@@ -24,7 +24,7 @@ class DialogueSaveTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.last = self.root / "last_optimized_prompt.md"
         self.last.write_text("之前的成功提示词", encoding="utf-8")
 

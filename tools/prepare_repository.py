@@ -314,6 +314,9 @@ def inspect_repository(root: Path, policy: dict | None = None) -> Snapshot:
 
 
 def output_path(root: Path, value: str | Path, suffix: str) -> Path:
+    # Windows temporary roots may use an 8.3 alias; expand relative output
+    # against the same canonical root used by containment checks.
+    root = root.resolve()
     requested = Path(value)
     if not requested.is_absolute():
         requested = root / requested

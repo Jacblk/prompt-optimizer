@@ -32,7 +32,7 @@ class RepositoryPreparationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.policy = policy()
         for name, content in {
             ".gitignore": render_gitignore(self.policy),
@@ -141,6 +141,15 @@ class RepositoryPreparationTests(unittest.TestCase):
                 output_path(self.root, name, ".zip")
         allowed = output_path(self.root, "maintenance/20261006/source.zip", ".zip")
         self.assertEqual(allowed, self.root / "maintenance/20261006/source.zip")
+
+    def test_relative_output_under_an_aliased_root_uses_the_canonical_root(self):
+        alias = self.root / "root-alias"
+        self.directory_link(alias, self.root)
+        allowed = output_path(alias, "maintenance/source.zip", ".zip")
+        self.assertEqual(allowed, self.root / "maintenance/source.zip")
+        for name in ("maintenance/../../source.zip", "app.py", ".env"):
+            with self.subTest(name=name), self.assertRaises(PreparationError):
+                output_path(alias, name, ".zip")
 
     def test_source_hardlink_to_private_config_is_never_read(self):
         self.write(".env", "private hardlink sentinel")

@@ -29,7 +29,7 @@ class CliTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="optimizer CLI 中文 ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.last = self.root / "last_optimized_prompt.md"
         self.last.write_text("之前的成功提示词", encoding="utf-8")
         self.configs = models()
@@ -371,7 +371,7 @@ raise SystemExit(cli.main(['only inspect src', '--json', '--quiet'], root=sys.ar
             self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
             data = json.loads(result.stdout.decode("utf-8"))
             self.assertEqual(data["optimized_prompt"], ORIGINAL + "\n中文 😀")
-            self.assertEqual(Path(data["files"]["prompt"]).parent, Path(temp))
+            self.assertEqual(Path(data["files"]["prompt"]).parent, Path(temp).resolve())
             self.assertEqual(result.stderr, b"")
 
     def test_import_and_help_work_without_site_packages_or_tui(self):
