@@ -1,0 +1,124 @@
+"""Hand-authored few-shot demonstrations, separate from evaluation inputs."""
+
+_DEVICE_EXAMPLES = (
+    "参考示例（模型补充，仅作演示）：\n"
+    "示例 1\n输入：演示：设备持续响应心跳。\n输出：{\"state\":\"在线\"}\n\n"
+    "示例 2\n输入：演示：设备断电，无心跳。\n输出：{\"state\":\"离线\"}"
+)
+
+# These teach how to rewrite a request, not how to answer its underlying task.
+GENERATION_EXAMPLES = [
+    {
+        "original_request": "缓存是什么给我讲讲",
+        "output": {
+            "status": "ready",
+            "optimized_prompt": "请解释缓存的基本概念与用途。",
+            "preserved_constraints": [],
+            "clarification_questions": [],
+            "change_summary": ["把口语化请求整理为明确的解释任务，未指定原文没有的受众或篇幅。"],
+        },
+    },
+    {
+        "original_request": "给刚上岗的馆员讲解我随后提供的借阅登记流程，亲切但不随意，先概括用途再说明步骤，只以我给的流程为准，200 字以内。",
+        "output": {
+            "status": "ready",
+            "optimized_prompt": (
+                "请依据随后提供的借阅登记流程，向刚上岗的馆员作讲解。\n"
+                "讲解顺序：先概括流程的用途，再说明办理步骤。\n"
+                "表达要求：亲切但不随意，全文不超过 200 字。\n"
+                "内容仅以提供的流程为准。"
+            ),
+            "preserved_constraints": [
+                {"source_quote": "给刚上岗的馆员", "constraint": "受众是刚上岗的馆员。"},
+                {"source_quote": "我随后提供的借阅登记流程", "constraint": "保留稍后提供的输入材料，不在优化阶段索要或虚构流程。"},
+                {"source_quote": "亲切但不随意", "constraint": "保留语气的两方面要求。"},
+                {"source_quote": "先概括用途再说明步骤", "constraint": "保持先用途、后步骤的顺序。"},
+                {"source_quote": "只以我给的流程为准，200 字以内", "constraint": "保留内容来源与篇幅限制。"},
+            ],
+            "clarification_questions": [],
+            "change_summary": ["分开任务、顺序、表达和内容边界，便于逐项遵循。"],
+        },
+    },
+    {
+        "original_request": "这是反复用的模板。照例子给状态文本打标签，正常启动 → OK；启动失败 → ERROR。文本是 {status_text}。只输出标签。",
+        "output": {
+            "status": "ready",
+            "optimized_prompt": (
+                "请按以下示例，为状态文本选择标签。\n"
+                "示例输入：正常启动\n示例输出：OK\n"
+                "示例输入：启动失败\n示例输出：ERROR\n"
+                "待判断文本：{status_text}\n"
+                "只输出标签。"
+            ),
+            "preserved_constraints": [
+                {"source_quote": "这是反复用的模板", "constraint": "保持模板可复用，不代填变量。"},
+                {"source_quote": "正常启动 → OK；启动失败 → ERROR", "constraint": "保留示例原文与标签对应关系。"},
+                {"source_quote": "{status_text}", "constraint": "变量名称及花括号保持不变。"},
+                {"source_quote": "只输出标签", "constraint": "下游输出不增加解释或分析过程。"},
+            ],
+            "clarification_questions": [],
+            "change_summary": ["把已有示例整理为输入/输出对，保留模板变量和标签输出约定。"],
+        },
+    },
+    {
+        "original_request": '这是可复用模板：将巡检记录中的设备状态标为在线或离线，只输出 {"state":"在线或离线"} 这样的 JSON，不要其他字段。待处理记录：{record}。',
+        "layer_decisions": [{"layer": "examples", "choice": "model", "value": _DEVICE_EXAMPLES}],
+        "output": {
+            "status": "ready",
+            "optimized_prompt": (
+                "请根据巡检记录判断设备是在线还是离线。\n"
+                + _DEVICE_EXAMPLES + "\n"
+                '待处理记录：{record}\n仅输出 {"state":"在线或离线"} 这样的 JSON，state 为对应状态，不要其他字段。'
+            ),
+            "preserved_constraints": [
+                {"source_quote": "在线或离线", "constraint": "保留用户给定的两个状态。"},
+                {"source_quote": '只输出 {"state":"在线或离线"} 这样的 JSON，不要其他字段',
+                 "constraint": "示例输出及下游结果都只含 state 字段，不增加分析字段。"},
+                {"source_quote": "{record}", "constraint": "变量保留为新输入，与示例分开。"},
+                {"source_quote": _DEVICE_EXAMPLES, "constraint": "完整保留用户采用的模型示例块及输入/输出映射。"},
+            ],
+            "clarification_questions": [],
+            "change_summary": ["将已选模型示例置于新输入前，原样保留并标明演示；保持 JSON 输出约定。"],
+        },
+    },
+    {
+        "original_request": "根据{方案甲}和{方案乙}帮现场维护人员选一个备份方案，只比较恢复时间和日常维护工作量。先比较再推荐，说明依据；不要讨论采购价格，也别编造测试结果。",
+        "output": {
+            "status": "ready",
+            "optimized_prompt": (
+                "请根据{方案甲}和{方案乙}，向现场维护人员推荐一个备份方案。\n"
+                "先以恢复时间、日常维护工作量为相同维度比较两个方案，再给出推荐及简短依据。\n"
+                "只比较这两个维度，不讨论采购价格，不编造测试结果；材料无法支持的判断明确说明依据不足。"
+            ),
+            "preserved_constraints": [
+                {"source_quote": "{方案甲}和{方案乙}", "constraint": "保留两个方案变量，不代填或预选赢家。"},
+                {"source_quote": "现场维护人员", "constraint": "维持原有受众。"},
+                {"source_quote": "只比较恢复时间和日常维护工作量", "constraint": "不扩展比较维度。"},
+                {"source_quote": "先比较再推荐，说明依据", "constraint": "保留比较到推荐的顺序，要求简短可核对的依据。"},
+                {"source_quote": "不要讨论采购价格，也别编造测试结果", "constraint": "保留排除项与事实边界。"},
+            ],
+            "clarification_questions": [],
+            "change_summary": ["把决策任务组织为一致维度的比较与推荐，保留范围和顺序，不执行方案选择。"],
+        },
+    },
+    {
+        "original_request": "给告警消息打标签，错误必须标 ERROR，正常必须标 OK。参考示例：磁盘读取错误 → OK。待分类内容：{alert}。只输出标签。",
+        "output": {
+            "status": "needs_clarification",
+            "optimized_prompt": (
+                "请为告警消息 {alert} 选择标签，最终只输出标签。\n"
+                "规则：错误必须标 ERROR，正常必须标 OK。\n"
+                "参考示例：磁盘读取错误 → OK。\n"
+                "[待确认：错误标记规则与参考示例冲突，须确认采用哪一种约定。]"
+            ),
+            "preserved_constraints": [
+                {"source_quote": "错误必须标 ERROR，正常必须标 OK", "constraint": "保留明确的标签规则。"},
+                {"source_quote": "磁盘读取错误 → OK", "constraint": "保留冲突示例以供确认，不擅改成 ERROR。"},
+                {"source_quote": "{alert}", "constraint": "保留输入变量，不实际分类。"},
+                {"source_quote": "只输出标签", "constraint": "保留下游输出约定。"},
+            ],
+            "clarification_questions": ["“错误必须标 ERROR”与“磁盘读取错误 → OK”冲突，应采用哪一种约定？"],
+            "change_summary": ["整理标签任务并指出原有规则与示例冲突，保留双方等待确认。"],
+        },
+    },
+]

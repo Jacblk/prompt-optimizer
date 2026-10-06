@@ -1,0 +1,45 @@
+Screen { background: $surface; }
+Header, Header.-tall { background: $primary-background; height: 1; }
+#workspace { height: 1fr; }
+#conversation { width: 1fr; padding: 0 1; }
+#sidebar { width: 43; min-width: 28; border-left: solid $primary; }
+.narrow #sidebar { display: none; }
+.narrow.sidebar-open #sidebar { display: block; width: 1fr; }
+.narrow.sidebar-open #conversation { display: none; }
+.compact #status { height: 1; }
+.compact #message-input { height: 4; }
+.compact #prompt-output { height: 3; }
+.compact #chat-log { min-height: 2; }
+#chat-log { height: 2fr; min-height: 3; border: round $primary; padding: 0 1; }
+#prompt-output { height: 1fr; max-height: 10; min-height: 3; border: round $success; }
+#message-input { height: 5; min-height: 3; border: round $accent; }
+.section-label { height: 1; color: $text-muted; }
+.button-row { height: 3; }
+.button-row Button { min-width: 8; width: 1fr; margin-right: 1; }
+#status { height: 2; padding: 0 1; color: $text; background: $primary-background; }
+.settings-pane { padding: 0 1; }
+.settings-pane Label { margin-top: 1; }
+.settings-pane Select, .settings-pane Input { width: 1fr; }
+#material-path { border: round $accent; }
+#material-path > .input--placeholder { color: $text 40%; }
+#material-list-box { height: 7; border: round $primary; background: $surface; }
+#material-list { height: 1fr; border: none; }
+#material-list-hint { height: auto; padding: 0 1; color: $text 40%; }
+#history-input { height: 18; min-height: 5; }
+#history-note { height: auto; color: $text-muted; }
+#materials-note { height: auto; color: $text-muted; }
+.dialog { width: 80%; max-width: 105; height: auto; max-height: 92%; padding: 1 2; border: thick $primary; background: $surface; }
+QuestionScreen, WindowScreen, PathScreen, ReportPickerScreen, ReportScreen, PreviewScreen { align: center middle; background: $background 75%; }
+.dialog-title { text-style: bold; margin-bottom: 1; height: auto; }
+.question-reason { color: $text-muted; height: auto; }
+.question-label { height: auto; margin-top: 1; }
+.question-answer { height: 4; min-height: 3; }
+.modal-error { color: $error; height: auto; }
+#question-dialog, #window-dialog { height: 90%; }
+#questions-scroll, #window-inputs { height: 1fr; min-height: 3; }
+QuestionScreen .button-row, WindowScreen .button-row { dock: bottom; }
+#preview-close, #report-close { dock: bottom; }
+#report-dialog, #preview-dialog { height: 90%; }
+#report-text, #report-dialogue, #preview-text { height: 1fr; }
+#report-dialog TabbedContent { height: 1fr; }
+#recent-reports { height: 12; }

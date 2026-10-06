@@ -1,0 +1,43 @@
+name: Offline Windows checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      LANGSMITH_TRACING: "false"
+      LANGCHAIN_TRACING_V2: "false"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Check upload scope
+        run: python -B -X utf8 tools/prepare_repository.py
+      - name: Create project environment
+        run: python -m venv .venv
+      - name: Install pinned dependencies
+        run: '& ./.venv/Scripts/python.exe -m pip install -r requirements.txt'
+      - name: Check installed dependencies
+        run: '& ./.venv/Scripts/python.exe -m pip check'
+      - name: Run offline regressions
+        run: '& ./.venv/Scripts/python.exe -B -X utf8 -W ignore::DeprecationWarning -m unittest discover -s tests -q'
+      - name: Confirm upload scope after tests
+        run: '& ./.venv/Scripts/python.exe -B -X utf8 tools/prepare_repository.py'
