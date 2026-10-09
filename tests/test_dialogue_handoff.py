@@ -115,7 +115,7 @@ def pipeline(calls=None, *, history=None, window=256000, **options):
     configs = models()
     windows = WindowLimits.from_config({"version": 1, "roles": {
         role: {**model_identity(config), "context_window": window} for role, config in configs.items()}}, configs)
-    opts = SimpleNamespace(allow_repair=True, choose_layers=False,
+    opts = SimpleNamespace(allow_repair=True, choose_layers=False, handoff_max_attempts=2,
                            max_input_chars=50000, **options)
     return DialogueHandoffPipeline(history or prepare_history(text="用户：只读，不改文件。"),
                                    windows, configs, opts, calls)

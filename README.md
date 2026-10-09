@@ -16,7 +16,7 @@ if (-not (Test-Path -LiteralPath .env)) {
 }
 ```
 
-填好 `.env` 中的三组模型配置后，双击 `启动提示词优化器.cmd`，或执行：
+双击 `配置提示词优化器.cmd` 填写 A/B/C 模型与参数后，双击 `启动提示词优化器.cmd`，或执行：
 
 ```powershell
 & .\.venv\Scripts\python.exe -X utf8 tui.py
@@ -41,23 +41,25 @@ if (-not (Test-Path -LiteralPath .env)) {
 
 stdout 默认只有成功提示词，`--json` 输出完整结果、用量、问题和保存路径；进度与错误写入 stderr。默认配置、报告目录和上次成功提示词都位于项目目录；显式传入的相对路径按当前工作目录解析。详细参数、管道、材料和交接示例见 [CLI 使用说明](CLI_WORKFLOW.md)。
 
-## 模型配置
+## 配置程序与 CLI
 
-按 `.env.example` 将需要的设置填入项目 `.env`，已有配置可以继续使用。模型名称和服务地址使用服务商实际提供的值。
+双击 `配置提示词优化器.cmd`、运行 `configure.py`，或在 TUI 设置页点击“配置模型与参数”，打开同一份配置表单。常用与高级参数分开显示，包含模型、上下文窗口、输出额度、尝试次数、历史和材料参数。已有 `.env` 继续使用；也可按 `.env.example` 手动填写。
+
+```powershell
+.\prompt-optimizer.cmd --configure
+.\prompt-optimizer.cmd --config-show --json
+.\prompt-optimizer.cmd --config-check --json
+.\prompt-optimizer.cmd --config-set run.network_max_attempts 4 --config-set run.prompt_max_repairs 2
+```
 
 - 使用 `GENERATOR_A`、`GENERATOR_B`、`JUDGE` 三组配置，每组需要 `_NAME`、`_API_KEY`、`_BASE_URL`；分别负责 A/B 生成和 C 独立评审。缺少任一组时会明确提示。
 - 使用 Chat Completions 兼容的 API 基地址；不要填完整的 `/chat/completions` 请求地址。
 
-每组配置可分别设置以下秒数；已有配置缺少提醒项时使用默认值，不必修改真实 `.env`。
+模型参数保存到 `.env`，运行默认值保存到 `optimizer_settings.json`，窗口只保存在 `context_windows.json`，绑定当前模型与服务。配置操作离线执行，密钥隐藏输入且留空保留；批量参数不接受密钥。模型与运行参数从新会话生效，TUI 的 token 预算和材料模式可为本次会话覆盖默认值。全部字段、默认规则、保存和优先级见 [配置说明](CONFIGURATION.md)。
 
-| 配置后缀 | 默认值 | 作用 |
-| --- | --- | --- |
-| `_TIMEOUT` | 90 | 限制连接、发送和连接池等待；不限制模型响应读取或流片段间隔 |
-| `_SLOW_WARNING_SECONDS` | 90 | 连续无有效活动时显示“等待较久”，继续等待；新活动会清除提醒 |
+上述三个文件均为本地配置，不随仓库发布。仓库提供空的 `context_windows.example.json`；首次填写并保存窗口时，配置程序创建 `context_windows.json`。从旧版本更新时保留已有本地窗口文件。
 
-例如 `JUDGE_SLOW_WARNING_SECONDS=180` 只调整 C 的提醒阈值。秒数必须为有限数值且至少 0.1；`_TIMEOUT` 仍最多为 3600 秒。流式参数由程序管理，`_EXTRA_BODY` 不能覆盖 `stream` 或 `stream_options`。
-
-启动主界面、预览材料、回看报告都不读取模型配置或调用模型。发送有效需求时才准备配置。交接缺少模型上下文窗口时，界面会提示填写；全部通过核验后保存到公开的 `context_windows.json`，不保存凭据。
+启动主界面、预览材料、回看报告均不读取模型凭据。历史发送直接复用有效窗口；缺失、绑定失效或容量不足时停止提交并提示配置入口，不弹出旧窗口表单，也不自动继续发送。需求、材料、历史、已有会话和上次成功文件保留，配置后由用户再次发送。
 
 ## 使用
 
@@ -85,7 +87,7 @@ A/B 在同一次生成中完成用途识别、分段组织、独立层边界核�
 
 C 独立评审 A/B 和原文，核对保真、权限、事实、材料及格式，并独立检查层边界，再检查重复与冗余、内部一致性、约束作用域、步骤有效性、交付一致性和改写收益。实质错层或用途混淆以带引文的 `layer_boundary` 问题指出正确归属和最小调整方式；已经改变权限、事实或格式的问题仍使用相应类别。必要的任务定位、不同用途的复述和用户要求的重复强调可以保留；排版偏好、原文缺少标题或固定快照位置不单独判为失败。原文清楚且改写无实际收益时可以保留原文。
 
-C 优先采用合格候选；没有可采用的合格稿且问题能依据完整已确认需求修正时，才发起一次自动修复。原生成器按有证据的意见作最小修改，C 再次执行全部检查；修复后仍有问题或修复已禁用时显示“需要复核”。修复意见不构成新的需求或操作授权。六类检查在同一轮 C 评审中完成；不含澄清、交接及重试时，A/B 生成至评审通常为 3 次模型调用，发生一次修复后为 5 次。
+C 优先采用合格候选；没有可采用的合格稿且问题能依据完整已确认需求修正时，才在会话额度内自动修复。默认每会话一次，可配置次数或设为 0 关闭。原生成器按有证据的意见作最小修改，每次修复后 C 再次执行全部检查；额度耗尽或修复禁用时显示“需要复核”。修复意见不构成新的需求或操作授权。六类检查在同一轮 C 评审中完成；不含澄清、交接及重试时，A/B 生成至评审通常为 3 次模型调用，每次修复再增加 2 次。
 
 对话不设固定澄清轮数，每次发送或回答后由模型决定继续提问还是生成。主动“暂停并保存”后，发送按钮显示“继续对话 F2”：空输入且材料未变时重新打开未决问题，不增加模型请求；有补充或材料、历史变化时先更新需求快照并重新判断。结果完成后仅修改材料或历史，也可直接按 F2，沿用已确认需求而不添加虚构补充。恢复和后续补充沿用累计预算。运行时可以编辑输入，发送与材料修改暂时锁定；发送时冻结需求、材料和历史快照，旧版本结果不能覆盖当前成功提示词。
 
@@ -111,7 +113,7 @@ C 优先采用合格候选；没有可采用的合格稿且问题能依据完整
 
 模型响应没有整次调用或读取的硬性等待上限。首次活动前从请求开始计时，之后从最近一次非空推理或正文片段计时；空片段、角色声明和连接心跳不算活动。“等待较久”只提醒，可继续等待或手动取消。网络连接、发送及连接池超时等真实失败仍使用有限重试；中途断流丢弃该次未完成正文，下一次尝试独立接收。
 
-流式优先；服务直接返回普通 JSON 时复用同一次请求，并在该会话后续使用普通调用。明确拒绝流式参数时，每个角色每会话最多增加一次普通调用回退，额外请求独立计账。token 上限可选，整个会话保持不变；失败或服务未返回用量时记为未知，设置 token 上限后会停止后续调度，包括回退请求。字符数只用于活动统计，不估算账单 token。每个会话最多自动修复一次提示词。
+流式优先；服务直接返回普通 JSON 时复用同一次请求，并在该会话后续使用普通调用。明确拒绝流式参数时，每个角色每会话最多增加一次普通调用回退，额外请求独立计账。token 上限可选，整个会话保持不变；失败或服务未返回用量时记为未知，设置 token 上限后会停止后续调度，包括回退请求。字符数只用于活动统计，不估算账单 token。网络尝试、结构纠正、交接尝试与会话修复额度分别配置。
 
 等待确认、暂停、成功、取消和失败都保存时间戳 JSON 报告到 `reports/`。只有当前有效版本的成功结果更新 `last_optimized_prompt.md`；取消、失败、待确认和旧版本保护上次成功提示词。保存失败保留界面内容，允许重试。报告包含原始需求及选中材料，按实际敏感程度保管。
 
@@ -139,7 +141,7 @@ GitHub Actions 配置在 Windows / Python 3.14 的干净环境中创建项目 `.
 # 只读预检；只扫描公开白名单，不读取、哈希或复制真实 .env
 & .\.venv\Scripts\python.exe -B -X utf8 tools\prepare_repository.py
 # 输出可审查清单及干净源码包；产物只写入被忽略的 maintenance/
-& .\.venv\Scripts\python.exe -B -X utf8 tools\prepare_repository.py --manifest maintenance/20261006/repository-manifest.json --archive maintenance/20261006/prompt-optimizer-source.zip
+& .\.venv\Scripts\python.exe -B -X utf8 tools\prepare_repository.py --manifest maintenance/20261009-publication/repository-manifest.json --archive maintenance/20261009-publication/prompt-optimizer-source.zip
 ```
 
 上传范围由 [公开文件规则](tools/repository_policy.json) 与 `.gitignore` 共同约束。新增源文件、基线或许可证时同步更新规则并重跑预检。详细范围、验证方法和上传步骤见[仓库准备说明](REPOSITORY_PREPARATION.md)，维护改动见[贡献说明](CONTRIBUTING.md)。当前尚未选定开源许可证。
@@ -147,6 +149,8 @@ GitHub Actions 配置在 Windows / Python 3.14 的干净环境中创建项目 `.
 ## 主要文件
 
 - `prompt-optimizer.cmd` / `cli.py`：命令行需求、终端澄清、管道、JSON、材料预览和报告回看。
+- `配置提示词优化器.cmd` / `configure.py` / `optimizer_config_ui.py`：独立配置程序与 TUI 共用表单。
+- `optimizer_settings.py` / `optimizer_settings.example.json`：共享参数定义、校验、批量保存及运行默认值。
 - `启动提示词优化器.cmd` / `launcher.py`：直接启动 TUI；`optimize.py` 为同一界面的旧文件名兼容入口。
 - `tui.py`、`tui.tcss`、`tui_clipboard.py`：界面、样式和 Windows Unicode 复制。
 - `optimizer_dialogue.py`、`optimizer_engine.py`：会话控制、澄清、生成、评审和共享预算。
@@ -156,3 +160,7 @@ GitHub Actions 配置在 Windows / Python 3.14 的干净环境中创建项目 `.
 - `optimizer_prompts.py`、`optimizer_layers.py`、`optimizer_examples.py`、`optimizer_selection.py`、`optimizer_review.py`：输出契约、提示模板、材料政策、示范选择和独立评审。
 - `baselines/`、`course_analysis/`：公开所需的九份基线及课程结论；其他历史基线仅本地保留。
 - `tools/prepare_repository.py`、`tools/repository_policy.json`：上传预检、精确清单及干净源码包。
+
+## 本次更新（2026-10-09）
+
+新增独立配置程序及 CLI 配置入口，CLI/TUI 共用参数校验、保存和持久默认值。历史整理与独立核验使用单独的输出额度，输出截断会明确报告原因；配置表单按 A/B/C 显示各阶段额度。窗口绑定改为本地配置，仓库只发布空模板，保留现有运行路径和启动入口。验证范围及结果见 [验收记录](TUI_ACCEPTANCE.md)。

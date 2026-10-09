@@ -460,7 +460,8 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("JUDGE_NAME", str(caught.exception))
 
     def test_option_validation(self):
-        for options in ({"retries": 6},
+        for options in ({"retries": -1}, {"handoff_max_attempts": 0},
+                        {"schema_max_attempts": 0}, {"prompt_max_repairs": -1},
                         {"token_budget": 0}, {"max_input_chars": -1}):
             with self.subTest(options=options), self.assertRaises(ConfigurationError):
                 RunOptions(**options)

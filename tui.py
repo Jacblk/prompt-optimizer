@@ -24,7 +24,8 @@ from optimizer_config import ROOT, ConfigurationError, OptimizerError, load_mode
 from optimizer_documents import DEFAULT_PURPOSE, DEFAULT_USAGE, ReferenceFile, ReferenceOptions, check_reference_path, prepare_references
 from optimizer_dialogue import UNSET
 from optimizer_engine import OptimizationResult, Optimizer, RunOptions
-from optimizer_handoff import WindowLimits, model_identity, prepare_history, read_window_config, required_roles
+from optimizer_handoff import WindowLimits, prepare_history, read_window_config
+from optimizer_settings import default_settings, read_settings, run_options, reference_options, history_options
 from tui_clipboard import copy_windows_text
 
 
@@ -33,6 +34,7 @@ STATUS_LABELS = {
     "needs_clarification": "待确认", "needs_review": "需要复核", "cancelled": "已取消",
     "failed": "运行失败", "budget_exceeded": "预算不足", "context_exceeded": "关键内容超限",
     "handoff_failed": "交接未完成", "handoff_fidelity_failed": "交接保真核验失败",
+    "handoff_output_truncated": "交接输出被截断",
     "handoff_configuration_error": "交接配置错误",
 }
 PHASE_LABELS = {
@@ -79,11 +81,6 @@ def _load_report(path):
 def _save_draft(text, path, **kwargs):
     from optimizer_reports import save_draft
     return save_draft(text, path, **kwargs)
-
-
-def _save_windows(configs, values, **kwargs):
-    from optimizer_reports import configure_dialogue_windows
-    return configure_dialogue_windows(configs, values, **kwargs)
 
 
 def _make_controller(optimizer, **kwargs):
@@ -215,50 +212,6 @@ class QuestionScreen(ModalScreen[dict]):
             self.dismiss({"action": "cancel", "answers": []})
 
 
-class WindowScreen(ModalScreen[dict | None]):
-    BINDINGS = [Binding("escape", "cancel", "取消")]
-
-    def __init__(self, configs, existing=None):
-        super().__init__()
-        self.configs = configs
-        self.existing = existing or {"version": 1, "roles": {}}
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="window-dialog", classes="dialog"):
-            yield Label("填写交接模型的上下文窗口", classes="dialog-title")
-            yield Static("按服务实际限制填写 token 上限。完整核验后才保存，不会调用模型。")
-            with VerticalScroll(id="window-inputs"):
-                for role in required_roles():
-                    yield Label({"a": "生成器 A", "b": "生成器 B", "judge": "评审 C"}[role])
-                    entry = self.existing.get("roles", {}).get(role, {})
-                    identity = model_identity(self.configs[role])
-                    bound = isinstance(entry, dict) and all(entry.get(key) == value for key, value in identity.items())
-                    yield Input(str(entry["context_window"]) if bound and type(entry.get("context_window")) is int else "", placeholder="实际窗口 token 上限", type="integer", id=f"window-{role}")
-            yield Static("", id="window-error", classes="modal-error")
-            with Horizontal(classes="button-row"):
-                yield Button("核验并保存", id="windows-save", variant="primary")
-                yield Button("取消", id="windows-cancel")
-
-    def action_cancel(self):
-        self.dismiss(None)
-
-    @on(Button.Pressed)
-    def pressed(self, event):
-        event.stop()
-        if event.button.id == "windows-cancel":
-            self.action_cancel()
-        elif event.button.id == "windows-save":
-            try:
-                values = {role: int(self.query_one(f"#window-{role}", Input).value) for role in required_roles()}
-                data = {"version": 1, "roles": {role: {**model_identity(self.configs[role]), "context_window": value} for role, value in values.items()}}
-                WindowLimits.from_config(data, self.configs)
-            except (ValueError, ConfigurationError) as error:
-                message = str(error) if isinstance(error, ConfigurationError) else "请为每个角色填写正整数。"
-                self.query_one("#window-error", Static).update(message)
-                return
-            self.dismiss(values)
-
-
 class PathScreen(ModalScreen[Path | None]):
     BINDINGS = [Binding("escape", "cancel", "取消")]
 
@@ -383,6 +336,10 @@ class _PreparationCancelled(Exception):
     pass
 
 
+class _MissingWindows(ConfigurationError):
+    pass
+
+
 @dataclass(frozen=True)
 class _Submission:
     text: str
@@ -421,7 +378,7 @@ class OptimizerApp(App):
 
     def __init__(self, *, root=ROOT, controller_factory=None, optimizer_factory=Optimizer,
                  config_loader=None, report_saver=None, report_loader=None,
-                 draft_saver=None, window_saver=None, clipboard_writer=None, prompt_saver=None):
+                 draft_saver=None, clipboard_writer=None, prompt_saver=None, configuration_store_factory=None):
         super().__init__()
         self.root = Path(root).resolve()
         self.controller_factory = controller_factory or _make_controller
@@ -431,7 +388,10 @@ class OptimizerApp(App):
         self.prompt_saver = prompt_saver or _publish_prompt
         self.report_loader = report_loader or _load_report
         self.draft_saver = draft_saver or _save_draft
-        self.window_saver = window_saver or _save_windows
+        self.configuration_store_factory = configuration_store_factory
+        self._pending_configuration = False
+        self._configuration_stamp = None
+        self._runtime_settings = default_settings()
         self.clipboard_writer = clipboard_writer
         self.controller = None
         self.result = None
@@ -488,7 +448,9 @@ class OptimizerApp(App):
                 with TabbedContent():
                     with TabPane("设置", id="settings-tab"):
                         with VerticalScroll(classes="settings-pane"):
-                            yield Label("会话 token 上限（可选）")
+                            yield Button("配置模型与参数", id="configure-models", variant="primary")
+                            yield Static("持久默认值在配置程序中修改；下方为本次会话设置。", id="configuration-note")
+                            yield Label("本次会话 token 上限（可选）")
                             yield Input(placeholder="留空不设上限；填写正整数", id="token-budget")
                             yield Static("A/B 生成、C 独立评审。\n请求数和耗时仅作统计。\ntoken 预算可选，可随时取消。\n等待回答暂停计时；继续和切换保留消耗。", id="budget-note")
                             yield Static("本产品只交付提示词。软件工程任务留给后续执行。", id="product-note")
@@ -502,7 +464,7 @@ class OptimizerApp(App):
                             yield Input(DEFAULT_PURPOSE, id="material-purpose")
                             yield Label("范围与遵循方式")
                             yield Input(DEFAULT_USAGE, id="material-usage")
-                            yield Label("覆盖范围")
+                            yield Label("本次材料覆盖范围")
                             yield Select([("完整可提取文本", "full"), ("相关片段（未覆盖全文）", "relevant")], value="full", allow_blank=False, id="reference-mode")
                             with Horizontal(classes="button-row"):
                                 yield Button("添加", id="add-material")
@@ -524,6 +486,7 @@ class OptimizerApp(App):
         self.query_one("#message-input", TextArea).focus()
         self._status("idle")
         self._update_controls()
+        self._refresh_defaults()
         self._status_timer = self.set_interval(1, self._refresh_status, pause=True)
 
     def _resize_layout(self, width, height):
@@ -545,7 +508,8 @@ class OptimizerApp(App):
         self.query_one("#chat-log", RichLog).write(f"{role}  {text}")
 
     def _protected_paths(self):
-        paths = [self.root / ".env", self.root / "context_windows.json", *[material.path for material in self.materials]]
+        paths = [self.root / ".env", self.root / "context_windows.json", self.root / "optimizer_settings.json",
+                 *[material.path for material in self.materials]]
         if self.query_one("#history-source", Select).value == "files":
             paths += [Path(line.strip().strip('"')).expanduser() for line in self.query_one("#history-input", TextArea).text.splitlines() if line.strip()]
         return tuple(paths)
@@ -571,6 +535,7 @@ class OptimizerApp(App):
         self.query_one("#cancel-run", Button).disabled = not self.busy or self._cancel_requested
         self.query_one("#new-session", Button).disabled = self.busy
         self.query_one("#token-budget", Input).disabled = self.busy or self.controller is not None
+        self.query_one("#configure-models", Button).disabled = self.busy
         for identifier in ("material-path", "material-purpose", "material-usage", "reference-mode", "history-source", "history-input", "add-material", "remove-material", "preview-materials"):
             self.query_one(f"#{identifier}").disabled = self.busy
         self.query_one("#material-list", OptionList).display = bool(self.materials)
@@ -669,11 +634,55 @@ class OptimizerApp(App):
             "save-draft": self.action_save_draft, "view-report": self.action_reports,
             "add-material": self.action_add_material, "remove-material": self.action_remove_material,
             "preview-materials": self.action_preview,
+            "configure-models": self.action_configure,
         }
         action = actions.get(event.button.id)
         if action is not None:
             event.stop()
             action()
+
+    def _refresh_defaults(self):
+        try:
+            settings = read_settings(self.root)
+            self._runtime_settings = settings
+            budget = settings["run"]["token_budget"]
+            self.query_one("#token-budget", Input).value = str(budget) if budget is not None else ""
+            self.query_one("#reference-mode", Select).value = settings["reference"]["mode"]
+        except ConfigurationError as error:
+            self.notify(str(error), severity="error")
+
+    def _config_file_stamp(self):
+        # Detect edits from the standalone program / CLI without reading credentials.
+        result = []
+        for name in (".env", "optimizer_settings.json", "context_windows.json"):
+            try:
+                metadata = (self.root / name).stat()
+                result.append((metadata.st_mtime_ns, metadata.st_size))
+            except OSError:
+                result.append(None)
+        return tuple(result)
+
+    def action_configure(self):
+        if self.busy or isinstance(self.screen, ModalScreen):
+            return
+        self.run_worker(self._configuration_worker(), name="配置", group="configuration", exit_on_error=False)
+
+    async def _configuration_worker(self):
+        from optimizer_config_ui import ConfigurationScreen
+        from optimizer_settings import ConfigurationStore
+        try:
+            store = await asyncio.to_thread(self.configuration_store_factory or ConfigurationStore, self.root, recover=True)
+            result = await self.push_screen_wait(ConfigurationScreen(store))
+            if result is not None and result["changed"]:
+                self._pending_configuration = self.controller is not None
+                self.query_one("#configuration-note", Static).update(
+                    "配置已保存。请新建会话生效；未提交需求、材料和历史将保留。" if self._pending_configuration
+                    else "配置已保存，下次发送使用新参数。")
+                if self.controller is None:
+                    self._refresh_defaults()
+                self._log("配置", "配置已保存，请重新发送；已有会话参数从新会话生效。")
+        except (ConfigurationError, OSError, UnicodeError) as error:
+            self.notify(str(error) if isinstance(error, ConfigurationError) else "配置无法读取。", severity="error")
 
     def action_add_material(self):
         if self.busy:
@@ -719,7 +728,8 @@ class OptimizerApp(App):
     async def _preview_worker(self):
         try:
             self._status("preview")
-            options = ReferenceOptions(mode=self.query_one("#reference-mode", Select).value)
+            settings = read_settings(self.root) if self.controller is None else self._runtime_settings
+            options = reference_options(settings, mode=self.query_one("#reference-mode", Select).value)
             query = self.query_one("#message-input", TextArea).text or self._submitted_text
             bundle = await asyncio.to_thread(prepare_references, tuple(self.materials), options, query=query)
             if not self._cancel_requested:
@@ -785,7 +795,7 @@ class OptimizerApp(App):
         # confirmed requirements rather than just this turn's short supplement.
         references = UNSET
         if self.controller is None or submission.reference_signature != self._submitted_reference_signature:
-            options = ReferenceOptions(mode=submission.reference_mode)
+            options = reference_options(self._runtime_settings, mode=submission.reference_mode)
             confirmed = self.controller.snapshot().get("confirmed_request", "") if self.controller is not None else ""
             query = "\n\n".join(part for part in (confirmed, submission.text if submission.text != confirmed else "") if part)
             references = await asyncio.to_thread(prepare_references, submission.materials, options, query=query) if submission.materials else None
@@ -795,38 +805,35 @@ class OptimizerApp(App):
         if submission.workflow == "handoff" and history is None:
             if submission.history_source == "files":
                 files = [Path(line.strip().strip('"')).expanduser() for line in submission.history_text.splitlines() if line.strip()]
-                history = await asyncio.to_thread(prepare_history, files)
+                history = await asyncio.to_thread(prepare_history, files, options=history_options(self._runtime_settings))
             else:
-                history = await asyncio.to_thread(prepare_history, text=submission.history_text)
+                history = await asyncio.to_thread(prepare_history, text=submission.history_text, options=history_options(self._runtime_settings))
         if self._cancel_requested:
             raise _PreparationCancelled
         return references, history
 
     async def _ensure_windows(self, configs):
         path = self.root / "context_windows.json"
-        existing = None
         try:
             existing = await asyncio.to_thread(read_window_config, path)
             WindowLimits.from_config(existing, configs)
             return existing
-        except ConfigurationError:
-            pass
-        values = await self.push_screen_wait(WindowScreen(configs, existing))
-        if values is None or self._cancel_requested:
-            raise _PreparationCancelled
-        return await asyncio.to_thread(self.window_saver, configs, values, path=path)
+        except ConfigurationError as error:
+            raise _MissingWindows(str(error) + " 请在设置中打开“配置模型与参数”，配置完成后重新发送；已有会话请先新建会话。") from None
 
     async def _submit_worker(self, submission):
         previous = (self._submitted_material_version, self._submitted_reference_signature,
                     self._submitted_history_signature)
         try:
             self._status("preparing")
+            if self.controller is None:
+                self._runtime_settings = read_settings(self.root)
             budget_text = submission.token_budget_text
             try:
                 token_budget = int(budget_text) if budget_text else None
             except ValueError:
                 raise ConfigurationError("会话 token 上限须为正整数，或留空不设上限。") from None
-            options = RunOptions(token_budget=token_budget)
+            options = run_options(self._runtime_settings, token_budget=token_budget)
             references, history = await self._prepare_inputs(submission)
             if self.controller is None:
                 configs = await asyncio.to_thread(self.config_loader, self.root)
@@ -840,6 +847,7 @@ class OptimizerApp(App):
             if self.controller is None:
                 optimizer = self.optimizer_factory(configs, options)
                 self.controller = self.controller_factory(optimizer, on_questions=self._on_questions, on_event=self._on_event)
+                self._configuration_stamp = self._config_file_stamp()
             self._submitted_material_version = submission.material_version
             self._submitted_reference_signature = submission.reference_signature
             self._submitted_history_signature = submission.history_signature
@@ -860,7 +868,7 @@ class OptimizerApp(App):
         except (OptimizerError, OSError, UnicodeError) as error:
             self._core_active = False
             self._submitted_material_version, self._submitted_reference_signature, self._submitted_history_signature = previous
-            await self._preparation_failure("failed", str(error))
+            await self._preparation_failure("handoff_configuration_error" if isinstance(error, _MissingWindows) else "failed", str(error))
         except Exception:
             self._core_active = False
             self._submitted_material_version, self._submitted_reference_signature, self._submitted_history_signature = previous
@@ -1025,8 +1033,6 @@ class OptimizerApp(App):
             return
         if isinstance(self.screen, QuestionScreen):
             self.screen.dismiss({"action": "cancel", "answers": []})
-        elif isinstance(self.screen, WindowScreen):
-            self.screen.dismiss(None)
         if self.controller is not None and self._core_active:
             result = await self.controller.cancel()
             if result is not None:
@@ -1034,7 +1040,7 @@ class OptimizerApp(App):
                 await self._persist_result(result)
 
     def action_new_session(self):
-        if self.busy:
+        if self.busy or isinstance(self.screen, ModalScreen):
             return
         self._set_busy(True)
         self.run_worker(self._new_session_worker(), name="新会话", group="interaction", exit_on_error=False)
@@ -1043,6 +1049,9 @@ class OptimizerApp(App):
         self._activity_request_ids.clear()
         self._finished_activity_requests.clear()
         try:
+            preserve_inputs = self._pending_configuration or (self.controller is not None
+                and self._configuration_stamp != self._config_file_stamp())
+            pending_text = self.query_one("#message-input", TextArea).text if preserve_inputs else ""
             if self.controller is not None:
                 await self.controller.close()
             self.controller = None
@@ -1054,9 +1063,15 @@ class OptimizerApp(App):
             self._submitted_reference_signature = None
             self._submitted_history_signature = None
             self.query_one("#chat-log", RichLog).clear()
-            self.query_one("#prompt-output", TextArea).load_text("")
-            self.query_one("#message-input", TextArea).load_text("")
-            self._log("系统", "已开始新会话，请输入本轮需求。调用记录、耗时统计和 token 预算已重置。材料与历史保留供选择。")
+            if not preserve_inputs:
+                self.query_one("#prompt-output", TextArea).load_text("")
+            self.query_one("#message-input", TextArea).load_text(pending_text)
+            self._pending_configuration = False
+            self._configuration_stamp = None
+            self._refresh_defaults()
+            self.query_one("#configuration-note", Static).update("持久默认值已加载；下方为本次会话设置。")
+            self._log("系统", "已开始新会话。调用记录和用量已重置，已加载保存的默认参数。材料与历史保留供选择。" +
+                      ("未提交需求和上次结果保留；上次结果仅供回看。" if preserve_inputs else "请输入本轮需求。"))
             self._status("idle", {})
         finally:
             self._set_busy(False)
@@ -1137,8 +1152,6 @@ class OptimizerApp(App):
         self._cancel_requested = True
         if isinstance(self.screen, QuestionScreen):
             self.screen.dismiss({"action": "cancel", "answers": []})
-        elif isinstance(self.screen, WindowScreen):
-            self.screen.dismiss(None)
         if self.controller is not None:
             result = await self.controller.cancel() if self.busy else self.controller.result
             if result is not None:

@@ -44,8 +44,9 @@ LANGUAGES = {".py": "python", ".pyi": "python", ".js": "js", ".mjs": "js", ".cjs
 def check_reference_path(path: Path) -> Path:
     """Resolve before any read, including symlinks pointing to .env files."""
     resolved = Path(path).expanduser().resolve()
-    if any(p.name.casefold().startswith(".env") for p in (Path(path), resolved)):
-        raise ConfigurationError("配置文件 .env 不能作为参考材料读取。")
+    if any(p.name.casefold().startswith(".env") or p.name.casefold() == "optimizer_settings.json"
+           for p in (Path(path), resolved)):
+        raise ConfigurationError("配置文件不能作为参考材料读取。")
     if resolved.suffix.casefold() not in TEXT_EXTENSIONS | {".pdf"}:
         raise ConfigurationError("参考文件格式不支持；请使用 UTF-8 文本、Markdown、代码或 PDF。")
     if not resolved.is_file():

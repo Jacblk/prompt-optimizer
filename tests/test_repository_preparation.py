@@ -67,7 +67,9 @@ class RepositoryPreparationTests(unittest.TestCase):
         for name in (".env", ".env.backup", "tests/.env", "reports/private.md",
                      "maintenance/log.json", "baselines/history/private.txt",
                      "evals/results/private.json", "evals/artifacts/private.txt",
-                     "last_optimized_prompt.md", ".venv/private.py"):
+                     "last_optimized_prompt.md", ".venv/private.py",
+                     "optimizer_settings.json", "tests/optimizer_settings.json",
+                     "context_windows.json", "tests/context_windows.json"):
             self.write(name, "private sentinel")
         seen = []
         original = Path.read_bytes
@@ -77,6 +79,8 @@ class RepositoryPreparationTests(unittest.TestCase):
             seen.append(relative)
             self.assertFalse(relative.startswith(".env") and relative != ".env.example")
             self.assertNotEqual(path.name, ".env")
+            self.assertNotEqual(path.name, "optimizer_settings.json")
+            self.assertNotEqual(path.name, "context_windows.json")
             return original(path)
 
         with patch.object(Path, "read_bytes", reading):
@@ -90,6 +94,32 @@ class RepositoryPreparationTests(unittest.TestCase):
             self.assertEqual(set(package.namelist()), set(snapshot.files))
             self.assertNotIn(b"private sentinel", b"".join(package.read(name) for name in package.namelist()))
             self.assertIn("baselines/boundary/templates.json", package.namelist())
+
+    def test_window_template_is_exported_without_reading_local_bindings(self):
+        self.policy["root_files"].append("context_windows.example.json")
+        self.write(".gitignore", render_gitignore(self.policy))
+        template = '{"version":1,"roles":{}}\n'
+        (self.root / "context_windows.example.json").write_bytes(template.encode())
+        self.write("context_windows.json", "private window sentinel")
+        original = Path.read_bytes
+
+        def reading(path):
+            self.assertNotEqual(path.name.casefold(), "context_windows.json")
+            return original(path)
+
+        with patch.object(Path, "read_bytes", reading):
+            snapshot = self.inspect()
+        self.assertFalse(snapshot.findings)
+        archive = output_path(self.root, "maintenance/source.zip", ".zip")
+        export_snapshot(snapshot, archive)
+        with zipfile.ZipFile(archive) as package:
+            self.assertNotIn("context_windows.json", package.namelist())
+            self.assertEqual(package.read("context_windows.example.json"), template.encode())
+
+    def test_window_bindings_cannot_be_added_to_the_public_policy(self):
+        self.policy["root_files"].append("context_windows.json")
+        with self.assertRaisesRegex(PreparationError, "protected-policy-path"):
+            validate_policy(self.policy)
 
     def test_required_baseline_missing_blocks_export(self):
         (self.root / "baselines/required.txt").unlink()
@@ -129,7 +159,7 @@ class RepositoryPreparationTests(unittest.TestCase):
         for name in ("../.env", "C:/secret.txt", "tests/../app.py", "/app.py"):
             with self.subTest(name=name), self.assertRaises(PreparationError):
                 safe_relative(name)
-        for name in (".env", ".env.backup", "tests/.env", "reports/private.md"):
+        for name in (".env", ".env.backup", "tests/.env", "reports/private.md", "optimizer_settings.json"):
             changed = policy()
             changed["root_files"] = [name]
             with self.subTest(name=name), self.assertRaises(PreparationError):
@@ -197,6 +227,7 @@ class RepositoryPreparationTests(unittest.TestCase):
     def test_genuine_git_ignore_and_index_match_upload_policy(self):
         self.write(".env", "private sentinel")
         self.write("tests/__pycache__/private.py", "private sentinel")
+        self.write("context_windows.json", "private window sentinel")
         self.write("baselines/history/private.txt", "private sentinel")
         subprocess.run(["git", "init", "-q"], cwd=self.root, capture_output=True, check=True)
         subprocess.run(["git", "add", "."], cwd=self.root, capture_output=True, check=True)
@@ -206,6 +237,8 @@ class RepositoryPreparationTests(unittest.TestCase):
         self.assertEqual(set(filter(None, tracked.stdout.decode().split("\0"))), set(snapshot.files))
         subprocess.run(["git", "add", "-f", ".env"], cwd=self.root, capture_output=True, check=True)
         self.assertIn(Finding(".env", 0, "tracked-outside-upload-policy"), self.inspect().findings)
+        subprocess.run(["git", "add", "-f", "context_windows.json"], cwd=self.root, capture_output=True, check=True)
+        self.assertIn(Finding("context_windows.json", 0, "tracked-outside-upload-policy"), self.inspect().findings)
 
     def test_manually_mutated_export_cannot_include_private_or_parent_paths(self):
         for name in (".env", "../outside.txt"):

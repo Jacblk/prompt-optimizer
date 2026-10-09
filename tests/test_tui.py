@@ -14,7 +14,10 @@ from optimizer_documents import LocalReferenceLoader, prepare_references
 from optimizer_dialogue import UNSET
 from optimizer_engine import OptimizationResult, Optimizer
 from optimizer_handoff import required_roles
-from tui import OptimizerApp, PathScreen, PreviewScreen, QuestionScreen, ReportPickerScreen, ReportScreen, WindowScreen, _publish_prompt, _save_result
+from tui import OptimizerApp, PathScreen, PreviewScreen, QuestionScreen, ReportPickerScreen, ReportScreen, _publish_prompt, _save_result
+from optimizer_config_ui import ConfigurationScreen, field_id
+from optimizer_settings import ConfigurationStore
+from test_configuration import seed_models
 
 
 class FakeController:
@@ -527,31 +530,35 @@ class TuiTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertEqual(app.result.status, "needs_clarification" if action == "pause" else "cancelled")
 
-    async def test_80_by_24_quality_windows_scroll_validate_save_and_cancel(self):
+    async def test_80_by_24_shared_configuration_scroll_validate_save_and_cancel(self):
         configs = {role: ModelConfig(role, f"offline-{role}", "https://example.invalid/v1", "dummy")
                    for role in required_roles()}
         responses = []
+        seed_models(self.root, configs)
         app = self.app()
         async with app.run_test(size=(80, 24)) as pilot:
-            await app.push_screen(WindowScreen(configs), responses.append)
-            await self.screen(app, pilot, WindowScreen)
-            await self.click(app, pilot, "#windows-save")
-            self.assertIsInstance(app.screen, WindowScreen)
-            self.assertIn("正整数", str(app.screen.query_one("#window-error", Static).render()))
-            for role in required_roles():
-                window = app.screen.query_one(f"#window-{role}", Input)
+            await app.push_screen(ConfigurationScreen(ConfigurationStore(self.root)), responses.append)
+            await self.screen(app, pilot, ConfigurationScreen)
+            app.screen.query_one("#" + field_id("run.network_max_attempts"), Input).value = "0"
+            await self.click(app, pilot, "#configuration-save")
+            self.assertIsInstance(app.screen, ConfigurationScreen)
+            self.assertIn("run.network_max_attempts", str(app.screen.query_one("#configuration-error", Static).render()))
+            app.screen.query_one("#" + field_id("run.network_max_attempts"), Input).value = "3"
+            for role in ("a", "b", "c"):
+                window = app.screen.query_one("#" + field_id(f"models.{role}.context_window"), Input)
                 window.focus()
                 await pilot.pause()
                 await pilot.press("6", "5", "5", "3", "6")
                 self.assertEqual(window.value, "65536")
-            await self.click(app, pilot, "#windows-save")
-            self.assertEqual(responses, [{role: 65536 for role in required_roles()}])
-            await app.push_screen(WindowScreen(configs), responses.append)
-            await self.screen(app, pilot, WindowScreen)
-            await self.click(app, pilot, "#windows-cancel")
+            await self.click(app, pilot, "#configuration-save")
+            self.assertEqual(responses[0]["status"], "configured")
+            self.assertEqual(ConfigurationStore(self.root).public()["models"]["a"]["context_window"], 65536)
+            await app.push_screen(ConfigurationScreen(ConfigurationStore(self.root)), responses.append)
+            await self.screen(app, pilot, ConfigurationScreen)
+            await self.click(app, pilot, "#configuration-cancel")
             self.assertEqual(responses[-1], None)
             self.loader.assert_not_called()
-            self.assertFalse((self.root / "context_windows.json").exists())
+            self.assertTrue((self.root / "context_windows.json").exists())
 
     async def test_80_by_24_failed_report_and_prompt_save_can_retry(self):
         saver = Mock(side_effect=OSError("保存位置暂时不可写"))

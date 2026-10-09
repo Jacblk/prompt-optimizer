@@ -1,7 +1,7 @@
 """Terminal and pipeline interface to the shared dialogue engine.
 
 Import and --help are stdlib-only. Configuration is loaded only for an explicit
-generation or context-window configuration action; previews remain offline.
+generation or configuration action; previews remain offline.
 """
 from __future__ import annotations
 
@@ -67,11 +67,17 @@ def build_parser(*, stdout, stderr):
     config.add_argument("--env-file", type=Path, help="模型配置文件；默认项目 .env")
     config.add_argument("--no-env", action="store_true", help="仅使用进程环境变量")
     parser.add_argument("--token-budget", type=positive_int, help="可选的会话 token 调度预算")
-    parser.add_argument("--retries", type=int, choices=range(6), default=1, help="网络失败重试次数（默认 1）")
-    parser.add_argument("--no-repair", action="store_true", help="关闭一次自动修复")
+    attempts = parser.add_mutually_exclusive_group()
+    attempts.add_argument("--retries", type=int, help="网络失败重试次数（不含首次，兼容选项）")
+    attempts.add_argument("--network-max-attempts", type=positive_int, help="网络失败最大尝试数（含首次；流式回退另算）")
+    parser.add_argument("--handoff-max-attempts", type=positive_int, help="每个历史整理阶段最大尝试数")
+    parser.add_argument("--schema-max-attempts", type=positive_int, help="每次澄清／分层结构最大尝试数")
+    parser.add_argument("--prompt-max-repairs", type=int, help="每会话提示词最大修复次数；0 关闭")
+    parser.add_argument("--no-token-budget", action="store_true", help="覆盖默认值，本次会话不设 token 预算")
+    parser.add_argument("--no-repair", action="store_true", help="关闭提示词和交接自动修复")
     material = parser.add_argument_group("材料与交接")
     material.add_argument("--reference-file", type=Path, action="append", default=[], help="本地参考文件，可重复")
-    material.add_argument("--reference-mode", choices=("full", "relevant"), default="full", help="全文或关键词相关片段")
+    material.add_argument("--reference-mode", choices=("full", "relevant"), help="覆盖默认材料模式：全文或关键词相关片段")
     material.add_argument("--reference-purpose", help="这些参考文件的用途")
     material.add_argument("--reference-usage", help="这些参考文件的遵循范围")
     material.add_argument("--reference-kind", choices=("auto", "implementation", "artifact", "execution"), default="auto")
@@ -84,6 +90,11 @@ def build_parser(*, stdout, stderr):
     action.add_argument("--show-report", type=Path, help="离线回看 JSON 报告，不恢复会话")
     action.add_argument("--configure-contexts", type=positive_int, nargs=3, metavar=("A", "B", "C"),
                         help="填写并保存三个角色的上下文窗口，不调用模型")
+    action.add_argument("--configure", action="store_true", help="交互配置向导；密钥隐藏输入，不调用模型")
+    action.add_argument("--config-show", action="store_true", help="查看配置及来源，不显示密钥")
+    action.add_argument("--config-check", action="store_true", help="离线检查模型、参数和窗口")
+    action.add_argument("--config-set", nargs=2, action="append", metavar=("KEY", "VALUE"),
+                        help="批量修改非密钥配置，可重复；null 清空可选值")
     return parser
 
 
@@ -129,6 +140,7 @@ def check_input_path(path, env_file):
     path = Path(path).expanduser()
     resolved = path.resolve()
     if (any(item.name.casefold().startswith(".env") for item in (path, resolved))
+            or any(item.name.casefold() == "optimizer_settings.json" for item in (path, resolved))
             or env_file is not None and _same_path(resolved, env_file.expanduser().resolve())):
         raise UsageError("配置文件不能作为需求、历史、材料或报告读取。")
     return resolved
@@ -164,13 +176,22 @@ def validate_arguments(args):
         raise UsageError("--preview-references 需要至少一个 --reference-file。")
     if args.preview_references and (has_history or args.output or args.report):
         raise UsageError("材料预览不接受历史或保存路径。")
-    if (args.show_report or args.configure_contexts) and (
+    config_action = args.configure or args.config_show or args.config_check or args.config_set
+    if args.retries is not None and args.retries < 0 or args.prompt_max_repairs is not None and args.prompt_max_repairs < 0:
+        raise UsageError("重试和修复次数须为非负整数。")
+    if args.no_token_budget and args.token_budget is not None:
+        raise UsageError("--token-budget 与 --no-token-budget 不能同时使用。")
+    if (args.show_report or args.configure_contexts or config_action) and (
             has_source or has_history or args.reference_file or args.output or args.report):
         raise UsageError("回看报告、配置窗口须单独执行，不能同时提交需求、材料、历史或保存路径。")
-    if args.context_config and not (has_history or args.configure_contexts):
-        raise UsageError("--context-config 仅用于历史交接或 --configure-contexts。")
+    if config_action and (args.token_budget is not None or args.no_token_budget or args.no_repair
+                          or any(getattr(args, key) is not None for key in
+                                 ("retries", "network_max_attempts", "handoff_max_attempts", "schema_max_attempts", "prompt_max_repairs"))):
+        raise UsageError("配置操作不能同时使用会话运行参数；请使用 --config-set。")
+    if args.context_config and not (has_history or args.configure_contexts or config_action):
+        raise UsageError("--context-config 仅用于历史交接或配置操作。")
     if not args.reference_file and (args.reference_purpose or args.reference_usage
-            or args.reference_mode != "full" or args.reference_kind != "auto"):
+            or args.reference_mode not in {None, "full"} or args.reference_kind != "auto"):
         raise UsageError("材料设置需要至少一个 --reference-file。")
 
 
@@ -260,7 +281,18 @@ async def run_session(args, *, text, configs, references, history, windows,
                       terminal, stdout, optimizer_factory):
     from optimizer_dialogue import DialogueController
     from optimizer_engine import Optimizer, RunOptions
-    options = RunOptions(token_budget=args.token_budget, retries=args.retries, allow_repair=not args.no_repair)
+    from optimizer_settings import run_options
+    overrides = {"allow_repair": not args.no_repair}
+    for key in ("handoff_max_attempts", "schema_max_attempts", "prompt_max_repairs"):
+        if getattr(args, key) is not None:
+            overrides[key] = getattr(args, key)
+    if args.retries is not None:
+        overrides["retries"] = args.retries
+    elif args.network_max_attempts is not None:
+        overrides["retries"] = args.network_max_attempts - 1
+    if args.token_budget is not None or args.no_token_budget:
+        overrides["token_budget"] = None if args.no_token_budget else args.token_budget
+    options = run_options(args.runtime_settings, **overrides)
     engine = (optimizer_factory or Optimizer)(configs, options, references=references,
                                                history=history, context_windows=windows)
     controller = DialogueController(engine, on_questions=terminal.questions, on_event=terminal.event)
@@ -301,6 +333,9 @@ def execute(args, *, stdin, stdout, stderr, root, config_loader, optimizer_facto
 
     env_file = None if args.no_env else (args.env_file or root / ".env")
     context_path = args.context_config or root / "context_windows.json"
+    if args.configure or args.config_show or args.config_check or args.config_set:
+        from optimizer_settings import configuration_cli
+        return configuration_cli(args, root=root, stdin=stdin, stdout=stdout, stderr=stderr)
     if args.show_report:
         data = load_report(check_input_path(args.show_report, env_file))
         if args.json:
@@ -322,6 +357,8 @@ def execute(args, *, stdin, stdout, stderr, root, config_loader, optimizer_facto
         else:
             print(f"窗口配置已保存：{context_path.resolve()}", file=stdout)
         return 0
+    from optimizer_settings import read_settings, reference_options, history_options
+    args.runtime_settings = read_settings(root)
     if args.interactive and (not is_terminal(stdin) or args.input == "-"):
         raise UsageError("--interactive 需要可读取回答的终端；请将需求放入 TEXT 或 --input 文件。")
     interactive = (not args.non_interactive and args.input != "-" and is_terminal(stdin)
@@ -337,7 +374,8 @@ def execute(args, *, stdin, stdout, stderr, root, config_loader, optimizer_facto
     references = prepare_references([
         ReferenceFile(path, args.reference_purpose or DEFAULT_PURPOSE, args.reference_usage or DEFAULT_USAGE,
                       args.reference_kind) for path in reference_paths],
-        ReferenceOptions(mode=args.reference_mode), query=text) if reference_paths else None
+        reference_options(args.runtime_settings, **({"mode": args.reference_mode} if args.reference_mode else {})),
+        query=text) if reference_paths else None
     if args.preview_references:
         if args.json:
             print_json(references.metadata(), stdout)
@@ -346,7 +384,7 @@ def execute(args, *, stdin, stdout, stderr, root, config_loader, optimizer_facto
             for warning in references.warnings:
                 print(warning, file=stderr)
         return 0
-    history = prepare_history(history_paths, text=args.history_text) if history_paths or args.history_text is not None else None
+    history = prepare_history(history_paths, text=args.history_text, options=history_options(args.runtime_settings)) if history_paths or args.history_text is not None else None
     configs = loader(env_file)
     windows = read_window_config(check_input_path(context_path, env_file)) if history is not None else None
     if windows is not None:
@@ -372,6 +410,8 @@ def main(argv=None, *, stdin=None, stdout=None, stderr=None, root=ROOT,
     except SystemExit as error:
         return int(error.code)
     except KeyboardInterrupt:
+        if args is not None and args.configure and args.json:
+            print_json({"status": "cancelled", "changed": [], "exit_code": 130}, stdout)
         print("已取消。", file=stderr)
         return 130
     except BrokenPipeError:

@@ -29,15 +29,16 @@ Header, Header.-tall { background: $primary-background; height: 1; }
 #history-note { height: auto; color: $text-muted; }
 #materials-note { height: auto; color: $text-muted; }
 .dialog { width: 80%; max-width: 105; height: auto; max-height: 92%; padding: 1 2; border: thick $primary; background: $surface; }
-QuestionScreen, WindowScreen, PathScreen, ReportPickerScreen, ReportScreen, PreviewScreen { align: center middle; background: $background 75%; }
+QuestionScreen, PathScreen, ReportPickerScreen, ReportScreen, PreviewScreen { align: center middle; background: $background 75%; }
 .dialog-title { text-style: bold; margin-bottom: 1; height: auto; }
 .question-reason { color: $text-muted; height: auto; }
 .question-label { height: auto; margin-top: 1; }
 .question-answer { height: 4; min-height: 3; }
 .modal-error { color: $error; height: auto; }
-#question-dialog, #window-dialog { height: 90%; }
-#questions-scroll, #window-inputs { height: 1fr; min-height: 3; }
-QuestionScreen .button-row, WindowScreen .button-row { dock: bottom; }
+#question-dialog { height: 90%; }
+#questions-scroll { height: 1fr; min-height: 3; }
+QuestionScreen .button-row { dock: bottom; }
+#configuration-note { height: auto; color: $text-muted; }
 #preview-close, #report-close { dock: bottom; }
 #report-dialog, #preview-dialog { height: 90%; }
 #report-text, #report-dialogue, #preview-text { height: 1fr; }

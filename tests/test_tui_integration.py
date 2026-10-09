@@ -8,12 +8,16 @@ import unittest
 from optimizer_engine import Optimizer
 from optimizer_models import ModelActivity
 from optimizer_handoff import model_identity, required_roles
+from optimizer_config import load_models, read_environment
+from optimizer_settings import ConfigurationStore
+from test_configuration import seed_models
 from test_dialogue import DialogueScripts, ORIGINAL, ask, draft, question, sufficient
 from test_dialogue_handoff import ScriptedCalls, models
 
 try:
     from textual.widgets import Input, Select, Static, TextArea
-    from tui import OptimizerApp, QuestionScreen, WindowScreen
+    from tui import OptimizerApp, QuestionScreen
+    from textual.screen import ModalScreen
 except ImportError:
     OptimizerApp = None
 
@@ -58,8 +62,86 @@ class TuiIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if condition():
                 return
         screen = pilot.app.screen
-        detail = screen.query_one("#window-error").render() if isinstance(screen, WindowScreen) else type(screen).__name__
+        detail = type(screen).__name__
         self.fail(f"integration condition did not arrive: {detail}")
+
+    async def test_configuration_failure_cancel_and_new_session_preserve_inputs_and_result(self):
+        from optimizer_config_ui import ConfigurationScreen, field_id
+        seed_models(self.root, self.configs)
+        ConfigurationStore(self.root).apply({f"models.{role}.context_window": 128000 for role in ("a", "b", "c")})
+        material = self.root / "material.md"
+        material.write_text("验收：下次仅检查异常处理，不改文件。", encoding="utf-8")
+        app = self.app(DialogueScripts(), history_calls=ScriptedCalls(current=True))
+        app.config_loader = lambda root: load_models(read_environment(root / ".env"))
+        async with app.run_test(size=(120, 42)) as pilot:
+            app.query_one("#message-input", TextArea).load_text(ORIGINAL)
+            app.action_send()
+            await self.wait_for(pilot, lambda: app.result is not None and not app.busy)
+            self.assertEqual(app.result.status, "ready")
+            controller, first = app.controller, app.result
+            previous_prompt = app.query_one("#prompt-output", TextArea).text
+            previous_file = (self.root / "last_optimized_prompt.md").read_bytes()
+            previous_calls = len(self.engines[0].calls)
+            pending = "下次仅检查异常处理，不改文件。"
+            app.query_one("#message-input", TextArea).load_text(pending)
+            app.query_one("#material-path", Input).value = str(material)
+            app.action_add_material()
+            app.query_one("#history-input", TextArea).load_text("用户：仅检查 src，不改文件。")
+            history_text = app.query_one("#history-input", TextArea).text
+            app.action_configure()
+            await self.wait_for(pilot, lambda: isinstance(app.screen, ConfigurationScreen)
+                                and bool(app.screen.query("#configuration-save")))
+            await pilot.pause()
+            app.screen.query_one("#" + field_id("run.network_max_attempts"), Input).value = "0"
+            await pilot.click("#configuration-save")
+            await pilot.pause()
+            self.assertIsInstance(app.screen, ConfigurationScreen)
+            self.assertIs(app.result, first)
+            self.assertIs(app.controller, controller)
+            app.screen.action_cancel()
+            await self.wait_for(pilot, lambda: not isinstance(app.screen, ConfigurationScreen))
+            self.assertFalse((self.root / "optimizer_settings.json").exists())
+            self.assertEqual(app.query_one("#message-input", TextArea).text, pending)
+            self.assertEqual(app.query_one("#prompt-output", TextArea).text, previous_prompt)
+            app.action_configure()
+            await self.wait_for(pilot, lambda: isinstance(app.screen, ConfigurationScreen)
+                                and bool(app.screen.query("#configuration-save")))
+            await pilot.pause()
+            for key, value in {"run.network_max_attempts": "4", "run.token_budget": "2000",
+                               "reference.mode": "relevant", "models.a.max_tokens": "20000"}.items():
+                app.screen.query_one("#" + field_id(key), Input).value = value
+            await pilot.click("#configuration-save")
+            await self.wait_for(pilot, lambda: not isinstance(app.screen, ConfigurationScreen) and app._pending_configuration)
+            self.assertIs(app.controller, controller)
+            self.assertEqual(self.engines[0].options.retries, 1)
+            self.assertEqual(self.engines[0].configs["a"].max_tokens, self.configs["a"].max_tokens)
+            self.assertEqual(len(self.engines[0].calls), previous_calls)
+            app.action_new_session()
+            await self.wait_for(pilot, lambda: not app.busy and app.controller is None)
+            self.assertEqual(app.query_one("#message-input", TextArea).text, pending)
+            self.assertEqual(app.query_one("#history-input", TextArea).text, history_text)
+            self.assertEqual(len(app.materials), 1)
+            self.assertEqual(app.query_one("#prompt-output", TextArea).text, previous_prompt)
+            self.assertEqual((self.root / "last_optimized_prompt.md").read_bytes(), previous_file)
+            self.assertEqual(app.query_one("#token-budget", Input).value, "2000")
+            self.assertEqual(app.query_one("#reference-mode", Select).value, "relevant")
+            app.action_send()
+            await self.wait_for(pilot, lambda: app.result is not None and not app.busy)
+            self.assertEqual(app.result.status, "ready", app.result.reason)
+            self.assertEqual(len(self.engines), 2)
+            self.assertEqual(self.engines[1].options.retries, 3)
+            self.assertEqual(self.engines[1].options.token_budget, 2000)
+            self.assertEqual(self.engines[1].configs["a"].max_tokens, 20000)
+            # A CLI / standalone save while this TUI is open has the same behavior.
+            ConfigurationStore(self.root).apply({"run.network_max_attempts": 5})
+            external_pending = "独立配置修改后尚未提交的需求"
+            app.query_one("#message-input", TextArea).load_text(external_pending)
+            external_prompt = app.query_one("#prompt-output", TextArea).text
+            app.action_new_session()
+            await self.wait_for(pilot, lambda: not app.busy and app.controller is None)
+            self.assertEqual(app.query_one("#message-input", TextArea).text, external_pending)
+            self.assertEqual(app.query_one("#prompt-output", TextArea).text, external_prompt)
+            self.assertEqual(app._runtime_settings["run"]["network_max_attempts"], 5)
 
     async def test_parallel_activity_cancel_preserves_success_and_failure_report(self):
         a_started, b_started = asyncio.Event(), asyncio.Event()
@@ -290,19 +372,23 @@ class TuiIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(json.loads(path.read_text(encoding="utf-8"))["status"] == "cancelled"
                                 for path in app.report_paths))
 
-    async def test_missing_window_modal_configures_then_uses_real_handoff_engine(self):
+    async def test_missing_window_stops_without_modal_then_manual_configuration_and_resend(self):
         history_calls = ScriptedCalls(current=True)
         app = self.app(DialogueScripts(), history_calls=history_calls)
         async with app.run_test(size=(120, 42)) as pilot:
             app.query_one("#history-input", TextArea).load_text("用户：只读，不改文件。")
             app.query_one("#message-input", TextArea).load_text(ORIGINAL)
             app.action_send()
-            await self.wait_for(pilot, lambda: isinstance(app.screen, WindowScreen))
-            await pilot.pause()
+            await self.wait_for(pilot, lambda: not app.busy)
+            self.assertEqual(app.result.status, "handoff_configuration_error")
+            self.assertNotIsInstance(app.screen, ModalScreen)
             self.assertEqual(len(history_calls.calls), 0)
-            for role in required_roles():
-                app.screen.query_one(f"#window-{role}", Input).value = "128000"
-            self.assertTrue(await pilot.click("#windows-save", offset=(5, 1)))
+            self.assertEqual(app.query_one("#message-input", TextArea).text, ORIGINAL)
+            from optimizer_reports import configure_dialogue_windows
+            configure_dialogue_windows(self.configs, {role: 128000 for role in required_roles()},
+                                       path=self.root / "context_windows.json")
+            self.assertEqual(len(history_calls.calls), 0)
+            await pilot.press("f2")
             await self.wait_for(pilot, lambda: not app.busy)
             self.assertEqual(app.result.status, "ready")
             self.assertNotIn("max_requests", app.result.metadata["limits"])
@@ -363,7 +449,7 @@ class TuiIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.engines), 1)
             self.assertEqual(len(history_calls.calls), 4)
 
-    async def test_invalid_new_history_and_cancelled_window_keep_existing_session_and_success(self):
+    async def test_invalid_history_and_missing_window_keep_existing_session_and_success(self):
         app = self.app(DialogueScripts(), history_calls=ScriptedCalls(current=True))
         async with app.run_test(size=(120, 42)) as pilot:
             app.query_one("#message-input", TextArea).load_text(ORIGINAL)
@@ -387,30 +473,19 @@ class TuiIntegrationTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#history-input", TextArea).load_text("用户：只读检查。")
             await pilot.pause()
             await pilot.press("f2")
-            await self.wait_for(pilot, lambda: isinstance(app.screen, WindowScreen))
-            await pilot.press("escape")
             await self.wait_for(pilot, lambda: not app.busy)
-            self.assertEqual(app.result.status, "cancelled")
+            self.assertEqual(app.result.status, "handoff_configuration_error")
+            self.assertNotIsInstance(app.screen, ModalScreen)
             self.assertIs(app.controller, controller)
             self.assertEqual(controller.snapshot(), before)
             self.assertFalse(controller.snapshot()["closed"])
             self.assertEqual(controller.optimizer.metadata()["request_count"], 4)
             self.assertEqual(last.read_text(encoding="utf-8"), previous_prompt)
-            await pilot.press("f2")
-            await self.wait_for(pilot, lambda: isinstance(app.screen, WindowScreen))
-            app.action_cancel_run()
-            await self.wait_for(pilot, lambda: not app.busy)
-            self.assertEqual(app.result.status, "cancelled")
-            self.assertIs(app.controller, controller)
-            self.assertEqual(controller.snapshot(), before)
-            self.assertFalse(controller.snapshot()["closed"])
+            from optimizer_reports import configure_dialogue_windows
+            configure_dialogue_windows(self.configs, {role: 128000 for role in required_roles()},
+                                       path=self.root / "context_windows.json")
             self.assertEqual(controller.optimizer.metadata()["request_count"], 4)
-            self.assertEqual(last.read_text(encoding="utf-8"), previous_prompt)
             await pilot.press("f2")
-            await self.wait_for(pilot, lambda: isinstance(app.screen, WindowScreen))
-            for role in required_roles():
-                app.screen.query_one(f"#window-{role}", Input).value = "128000"
-            self.assertTrue(await pilot.click("#windows-save", offset=(5, 1)))
             await self.wait_for(pilot, lambda: not app.busy)
             self.assertEqual(app.result.status, "ready")
             self.assertIs(app.controller, controller)

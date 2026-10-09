@@ -60,7 +60,7 @@ class CliTests(unittest.TestCase):
 
     def test_invalid_inputs_stop_before_config_or_model(self):
         invalid = [[], [""], ["TEXT", "--input", "missing.md"], ["--token-budget", "0"],
-                   ["TEXT", "--retries", "6"], ["--unknown"], ["--preview-references"],
+                   ["TEXT", "--retries", "-1"], ["--unknown"], ["--preview-references"],
                    ["TEXT", "--context-config", "windows.json"], ["TEXT", "--reference-mode", "relevant"],
                    ["TEXT", "--interactive"], ["--input", str(self.root / "missing.md")],
                    ["--show-report", "a.json", "TEXT"], ["--configure-contexts", "1", "2", "3", "TEXT"],

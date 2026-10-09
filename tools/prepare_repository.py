@@ -33,6 +33,7 @@ SOURCE_SUFFIXES = frozenset({".py", ".md", ".json", ".jsonl", ".txt", ".cmd", ".
 EXCLUDED_DESCRIPTION = [
     ".env and private .env variants (existence only; contents never accessed)",
     "virtual environments and caches", "reports/", "last_optimized_prompt.md",
+    "optimizer_settings.json", "context_windows.json",
     "evals/results/", "evals/artifacts/", "maintenance/", "unlisted baseline archives",
     "all other paths absent from the upload policy",
 ]
@@ -104,7 +105,7 @@ def forbidden(name: str) -> bool:
         return False
     return (any(part.startswith(".env") for part in lower)
             or any(part in PRIVATE_DIRECTORIES for part in lower)
-            or lower[-1] == "last_optimized_prompt.md"
+            or lower[-1] in {"last_optimized_prompt.md", "optimizer_settings.json", "context_windows.json"}
             or lower[-1].startswith(".optimizer-")
             or lower[-1].endswith((".pyc", ".pyo"))
             or lower[:2] in {("evals", "results"), ("evals", "artifacts")})
@@ -198,7 +199,8 @@ def render_gitignore(policy: dict) -> str:
         ".env*", "!/.env.example", ".venv/", "venv/", "__pycache__/", "*.py[cod]",
         ".pytest_cache/", ".mypy_cache/", ".ruff_cache/", ".coverage", "htmlcov/",
         "node_modules/", "reports/", "/evals/results/", "/evals/artifacts/", "/maintenance/",
-        "last_optimized_prompt.md", ".optimizer-*", ".DS_Store", "Thumbs.db", "",
+        "last_optimized_prompt.md", "optimizer_settings.json", "context_windows.json",
+        ".optimizer-*", ".DS_Store", "Thumbs.db", "",
     ])
     return "\n".join(lines)
 

@@ -29,6 +29,10 @@ class OutputError(OptimizerError):
         self.usage = usage
 
 
+class OutputTruncatedError(OutputError):
+    """A response reached its output/context limit; partial output is unusable."""
+
+
 class ModelCallError(OptimizerError):
     pass
 
@@ -272,7 +276,11 @@ class LangChainChatModel:
 
     def _reply(self, content, usage, model, finish_reason):
         reported_usage = self._usage(usage)
-        if finish_reason in {"length", "max_tokens", "content_filter"}:
+        if finish_reason in {"length", "max_tokens"}:
+            raise OutputTruncatedError(
+                f"{self.config.role} 响应达到输出或上下文上限，正文未完成"
+                f"（本次输出上限 {self.config.max_tokens} token）。", usage=reported_usage)
+        if finish_reason == "content_filter":
             raise OutputError(f"{self.config.role} 返回了被截断或未完成的响应。", usage=reported_usage)
         if finish_reason is None:
             raise TransientModelError(f"{self.config.role} 响应在完成前中断。")

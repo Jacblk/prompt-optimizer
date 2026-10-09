@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from optimizer_config import ConfigurationError, ModelConfig, model_config
 from optimizer_dialogue import DialogueSession
@@ -168,6 +169,34 @@ class ActivityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(models["a"].disabled, 1)
         self.assertEqual(runner.unknown_usage, 1)
         self.assertEqual(runner.known_tokens, 8)
+
+    async def test_more_than_old_retry_cap_and_stream_fallback_have_separate_allowances(self):
+        actions = [StreamingUnsupportedError("offline rejection")]
+        actions += [TransientModelError("offline network failure") for _ in range(7)]
+        actions += [ModelReply("complete", 1, 1, 2)]
+        runner, models, _ = self.make_runner({"a": actions}, retries=7)
+        with patch("optimizer_engine.asyncio.sleep", new_callable=AsyncMock):
+            reply = await runner._call("a", "system", {}, "generate")
+        self.assertEqual(reply.text, "complete")
+        self.assertEqual(len(runner.calls), 9)
+        self.assertEqual([row["attempt"] for row in runner.calls], list(range(1, 10)))
+        self.assertEqual(sum(row["status"] == "stream_unsupported" for row in runner.calls), 1)
+        self.assertEqual(sum(row["status"] == "transient_error" for row in runner.calls), 7)
+        self.assertEqual(models["a"].disabled, 1)
+        exhausted, _, _ = self.make_runner({"a": [TransientModelError("offline") for _ in range(9)]}, retries=7)
+        with patch("optimizer_engine.asyncio.sleep", new_callable=AsyncMock):
+            with self.assertRaises(ModelCallError):
+                await exhausted._call("a", "system", {}, "generate")
+        self.assertEqual(len(exhausted.calls), 8)
+
+    async def test_large_attempt_count_does_not_overflow_retry_backoff(self):
+        actions = [TransientModelError("offline failure") for _ in range(1100)]
+        actions += [ModelReply("complete", 1, 1, 2)]
+        runner, _, _ = self.make_runner({"a": actions}, retries=1100)
+        with patch("optimizer_engine.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            self.assertEqual((await runner._call("a", "system", {}, "generate")).text, "complete")
+        self.assertEqual(len(runner.calls), 1101)
+        self.assertTrue(all(0 <= args.args[0] <= 4 for args in sleep.await_args_list))
 
     async def test_fallback_is_blocked_by_unknown_usage_token_budget(self):
         runner, models, _ = self.make_runner({"a": [StreamingUnsupportedError("offline unsupported stream"),

@@ -1,7 +1,8 @@
 """Explicit configuration loading; importing this module does not read .env."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 import json
 import math
 import os
@@ -33,6 +34,40 @@ class ModelConfig:
     json_mode: bool = False
     extra_body: dict = field(default_factory=dict, repr=False)
     slow_warning_seconds: float = 90.0
+    handoff_max_tokens: int | None = None
+    handoff_reasoning_effort: str | None = None
+
+
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+
+def handoff_model_config(config: ModelConfig) -> ModelConfig:
+    """Use separate history settings without mutating the generation config.
+
+    DeepSeek's documented thinking default is 64K completion tokens. An 8K
+    generation limit can exhaust that shared reasoning/output allowance before
+    a history summary appears. Preserve the requested effort and reserve 64K
+    for history extraction/merge/update and their independent fidelity checks.
+    Other models inherit their existing settings unless explicitly overridden.
+    """
+    extra = deepcopy(config.extra_body)
+    if config.handoff_reasoning_effort is not None:
+        extra["reasoning_effort"] = config.handoff_reasoning_effort
+    thinking = extra.get("thinking")
+    thinking_disabled = isinstance(thinking, dict) and thinking.get("type") == "disabled"
+    deepseek_thinking = (config.role in {"a", "judge"}
+                         and config.name in {"deepseek-flash", "deepseek-v4-pro"}
+                         and extra.get("reasoning_effort") != "none" and not thinking_disabled)
+    tokens = config.handoff_max_tokens
+    if tokens is None:
+        tokens = max(config.max_tokens, 65536) if deepseek_thinking else config.max_tokens
+    if tokens == config.max_tokens and extra == config.extra_body:
+        return config
+    return replace(config, max_tokens=tokens, extra_body=extra)
+
+
+def is_handoff_call(purpose: str) -> bool:
+    return purpose.startswith(("extract-", "merge-", "update-"))
 
 
 def read_environment(env_file: Path | None = ROOT / ".env") -> dict[str, str]:
@@ -90,8 +125,16 @@ def model_config(values: Mapping[str, str], prefix: str, role: str) -> ModelConf
     def reject_constant(value):
         raise ValueError("Non-finite JSON value")
 
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate JSON key")
+            result[key] = value
+        return result
+
     try:
-        extra = json.loads(get("EXTRA_BODY") or "{}", parse_constant=reject_constant)
+        extra = json.loads(get("EXTRA_BODY") or "{}", parse_constant=reject_constant, object_pairs_hook=unique)
     except (ValueError, RecursionError):
         raise ConfigurationError(f"{prefix}_EXTRA_BODY 必须是 JSON 对象。") from None
     reserved = {"model", "messages", "stream", "stream_options", "n", "max_tokens", "max_completion_tokens",
@@ -104,14 +147,20 @@ def model_config(values: Mapping[str, str], prefix: str, role: str) -> ModelConf
     json_mode = get("JSON_MODE").lower() or "false"
     if json_mode not in {"true", "false"}:
         raise ConfigurationError(f"{prefix}_JSON_MODE 只能是 true 或 false。")
+    handoff_tokens = (_number(values, f"{prefix}_HANDOFF_MAX_TOKENS", "", integer=True,
+                              minimum=1) if get("HANDOFF_MAX_TOKENS") else None)
+    handoff_effort = get("HANDOFF_REASONING_EFFORT") or None
+    if handoff_effort is not None and handoff_effort not in REASONING_EFFORTS:
+        raise ConfigurationError(f"{prefix}_HANDOFF_REASONING_EFFORT 不是有效的推理强度。")
     return ModelConfig(
         role=role, name=get("NAME"), base_url=base_url, api_key=get("API_KEY"),
         temperature=temperature,
-        timeout=_number(values, f"{prefix}_TIMEOUT", "90", minimum=0.1, maximum=3600),
+        timeout=_number(values, f"{prefix}_TIMEOUT", "90", minimum=0.1),
         max_tokens=_number(values, f"{prefix}_MAX_TOKENS", "8192", integer=True,
-                           minimum=128, maximum=131072),
+                           minimum=1),
         token_limit_field=token_field, json_mode=json_mode == "true", extra_body=extra,
         slow_warning_seconds=_number(values, f"{prefix}_SLOW_WARNING_SECONDS", "90", minimum=0.1),
+        handoff_max_tokens=handoff_tokens, handoff_reasoning_effort=handoff_effort,
     )
 
 

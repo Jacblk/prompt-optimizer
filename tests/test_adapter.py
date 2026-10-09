@@ -97,6 +97,25 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("max_tokens", payload)
         self.assertEqual(payload["temperature"], 0.5)
 
+    async def test_saved_output_above_old_cap_reaches_the_installed_sdk(self):
+        from optimizer_config import load_models, read_environment, handoff_model_config
+        from optimizer_settings import ConfigurationStore
+        from test_configuration import seed_models
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            seed_models(root)
+            ConfigurationStore(root).apply({"models.a.base_url": self.url,
+                "models.a.max_tokens": 384000, "models.a.handoff_max_tokens": 500000,
+                "models.a.context_window": 1000000})
+            config = load_models(read_environment(root / ".env"))["a"]
+            for profile in (config, handoff_model_config(config)):
+                model = LangChainChatModel(profile)
+                try:
+                    await model.complete("system", {}, timeout=3)
+                finally:
+                    await model.close()
+        self.assertEqual([payload["max_tokens"] for _, payload in self.requests], [384000, 500000])
+
     async def test_loaded_reference_blocks_survive_the_actual_sdk_transport(self):
         from optimizer_documents import ReferenceFile, prepare_references
         with tempfile.TemporaryDirectory() as temp:

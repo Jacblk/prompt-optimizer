@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "run": {
+    "network_max_attempts": 2,
+    "handoff_max_attempts": 2,
+    "schema_max_attempts": 2,
+    "prompt_max_repairs": 1,
+    "token_budget": null,
+    "max_input_chars": null,
+    "max_builtin_examples": 3,
+    "max_example_chars": 4000
+  },
+  "history": {
+    "chunk_bytes": 24000,
+    "max_files": 10,
+    "max_file_bytes": 5242880,
+    "max_chars": 200000
+  },
+  "reference": {
+    "mode": "full",
+    "chunk_size": 1600,
+    "chunk_overlap": 160,
+    "max_chunks": 6,
+    "max_chars": null,
+    "max_files": 10,
+    "max_file_bytes": 5242880,
+    "max_extracted_chars": 200000,
+    "max_pdf_pages": 200
+  }
+}

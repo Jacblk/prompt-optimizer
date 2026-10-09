@@ -10,7 +10,10 @@ from pathlib import Path
 import random
 import time
 
-from optimizer_config import ConfigurationError, ModelConfig, OptimizerError
+from optimizer_config import (
+    ConfigurationError, ModelConfig, OptimizerError, REASONING_EFFORTS,
+    handoff_model_config, is_handoff_call,
+)
 from optimizer_models import (
     Draft, LangChainChatModel, ModelActivity, ModelCallError, ModelReply, OutputError,
     StreamingUnsupportedError, TransientModelError, parse_output,
@@ -29,7 +32,7 @@ from optimizer_layers import (
     changed_model_reference_block, validate_decisions,
 )
 from optimizer_handoff import (
-    FidelityFailed, HandoffError, HistoryBundle, HistoryPipeline,
+    FidelityFailed, HandoffError, HandoffOutputTruncated, HistoryBundle, HistoryPipeline,
     WindowExceeded, WindowLimits, read_window_config,
     history_fingerprint,
 )
@@ -48,13 +51,20 @@ class RunOptions:
     choose_layers: bool = False
     max_builtin_examples: int = DEFAULT_MAX_BUILTIN_EXAMPLES
     max_example_chars: int = DEFAULT_MAX_EXAMPLE_CHARS
+    handoff_max_attempts: int = 2
+    schema_max_attempts: int = 2
+    prompt_max_repairs: int = 1
 
     def __post_init__(self):
         validate_example_limits(self.max_builtin_examples, self.max_example_chars)
         if (self.max_input_chars is not None and (
                     type(self.max_input_chars) is not int or self.max_input_chars < 1)
-                or type(self.retries) is not int or not 0 <= self.retries <= 5):
-            raise ConfigurationError("输入长度须为正整数或不设上限；重试次数须为 0 到 5。")
+                or type(self.retries) is not int or self.retries < 0):
+            raise ConfigurationError("输入长度须为正整数或不设上限；重试次数须为非负整数。")
+        if any(type(n) is not int or n < 1 for n in (self.handoff_max_attempts, self.schema_max_attempts)):
+            raise ConfigurationError("交接和结构最大尝试数须为正整数。")
+        if type(self.prompt_max_repairs) is not int or self.prompt_max_repairs < 0:
+            raise ConfigurationError("提示词修复次数须为非负整数。")
         if self.token_budget is not None and (type(self.token_budget) is not int or self.token_budget < 1):
             raise ConfigurationError("token 预算必须是正整数。")
 
@@ -296,11 +306,19 @@ class Optimizer:
             self._emit_activity(record)
 
     async def _call(self, role, system, payload, purpose):
-        estimate = self.windows.check(role, self.configs[role], system, payload) if self.windows else None
+        history_call = is_handoff_call(purpose)
+        config = handoff_model_config(self.configs[role]) if history_call else self.configs[role]
+        model_key = f"{role}:handoff" if config != self.configs[role] else role
+        estimate = self.windows.check(role, config, system, payload) if self.windows else None
         attempt, retries_used = 0, 0
         while True:
             attempt += 1
             record = self._reserve(role, purpose, attempt)
+            record.update(model_profile="handoff" if history_call else "generation",
+                          max_tokens=config.max_tokens)
+            effort = config.extra_body.get("reasoning_effort")
+            if isinstance(effort, str) and effort in REASONING_EFFORTS:
+                record["reasoning_effort"] = effort
             if estimate is not None:
                 record["window_check"] = estimate
             started = self._active_calls[record["request_id"]]["started"]
@@ -308,10 +326,12 @@ class Optimizer:
             retry = False
             fallback = False
             try:
-                if role not in self.models:
-                    self.models[role] = self.factory(self.configs[role])
-                timeout = self.configs[role].timeout
-                reply: ModelReply = await self.models[role].complete(
+                if model_key not in self.models:
+                    self.models[model_key] = self.factory(config)
+                    if role in self._streaming_fallback_roles:
+                        self.models[model_key].disable_streaming()
+                timeout = config.timeout
+                reply: ModelReply = await self.models[model_key].complete(
                     system, payload, timeout=timeout,
                     on_activity=lambda activity, request_record=record: self._on_model_activity(request_record, activity))
                 record.update(status="ok", input_tokens=reply.input_tokens,
@@ -334,7 +354,7 @@ class Optimizer:
                 if role in self._streaming_fallback_roles:
                     raise ModelCallError(f"{role} 接口不支持当前请求参数。") from None
                 self._streaming_fallback_roles.add(role)
-                self.models[role].disable_streaming()
+                self.models[model_key].disable_streaming()
                 retry, fallback = True, True
             except (TransientModelError, TimeoutError):
                 record["status"] = "transient_error"
@@ -377,7 +397,7 @@ class Optimizer:
                 record["activity_state"] = "retrying"
                 self._emit_activity(record)
                 try:
-                    delay = 0 if fallback else min(0.5 * (2 ** (retries_used - 1)), 4.0)
+                    delay = 0 if fallback else 0.5 * (2 ** min(retries_used - 1, 3))
                     await asyncio.sleep(delay)
                 finally:
                     self._active_calls.pop(record["request_id"], None)
@@ -406,7 +426,7 @@ class Optimizer:
         system = analysis_prompt()
         # One schema correction, using the same token budget. Never
         # proceed to user choices with advice masquerading as reference material.
-        for attempt in range(2):
+        for attempt in range(self.options.schema_max_attempts):
             reply = await self._call(role, system,
                 {**self._request_payload(analysis=True), "phase": "layer_analysis"},
                 "layer_analysis_repair" if attempt else "layer_analysis")
@@ -414,8 +434,8 @@ class Optimizer:
                 analysis = parse_output(reply.text, LayerAnalysis)
                 break
             except OutputError:
-                if attempt:
-                    raise OutputError("缺层识别连续两次未符合结构要求，已停止生成。") from None
+                if attempt + 1 == self.options.schema_max_attempts:
+                    raise OutputError("缺层识别已达到结构最大尝试数，已停止生成。") from None
                 self.warnings.append("缺层识别未符合结构要求，已请求一次重新识别。")
                 system += ("\n上次识别不符合结构要求。请重新返回完整八层 JSON，核对字段、状态及引用；"
                            "缺失的 references 必须包含具体 reference_materials，每份有类型、用途和遵循方式；"
@@ -668,28 +688,29 @@ class Optimizer:
         if self.dialogue_session:
             self._dialogue_candidates = candidates
         review = await self._review(candidates, "review")
-        if review.action != "repair":
-            return self._decision(review, candidates)
-        if not self.options.allow_repair:
-            return self._finish("needs_review", candidates, reason="候选需要修复，本次已禁用自动修复。")
-        if self.dialogue_session is not None:
-            if self.dialogue_session.prompt_repairs_used:
-                return self._finish("needs_review", candidates, reason="本会话已使用一次提示词修复，已停止自动修复。")
-            self.dialogue_session.prompt_repairs_used += 1
-        chosen = next(c for c in candidates if c.id == review.candidate_id)
-        assessment = next(r for r in review.reviews if r.candidate_id == chosen.id)
-        repaired = await self._generate(chosen.origin, {
-            "candidate": chosen.draft.optimized_prompt,
-            "findings": [f.model_dump() for f in assessment.findings],
-        })
-        candidate = Candidate(chosen.id + "_repaired", chosen.origin, repaired)
-        candidates.append(candidate)
-        finalists = [c for c in candidates if c.origin == "original"] + [candidate]
-        self.rng.shuffle(finalists)
-        final_review = await self._review(finalists, "repair_review")
-        if final_review.action == "repair":
-            return self._finish("needs_review", candidates, reason="一次修复后仍未通过，已停止自动修复。")
-        return self._decision(final_review, candidates)
+        repairs_used = self.dialogue_session.prompt_repairs_used if self.dialogue_session else 0
+        while review.action == "repair":
+            if not self.options.allow_repair or self.options.prompt_max_repairs == 0:
+                return self._finish("needs_review", candidates, reason="候选需要修复，本次已禁用自动修复。")
+            if repairs_used >= self.options.prompt_max_repairs:
+                return self._finish("needs_review", candidates, reason="已达到提示词修复次数上限，已停止自动修复。")
+            repairs_used += 1
+            if self.dialogue_session is not None:
+                self.dialogue_session.prompt_repairs_used = repairs_used
+            chosen = next(c for c in candidates if c.id == review.candidate_id)
+            assessment = next(r for r in review.reviews if r.candidate_id == chosen.id)
+            repaired = await self._generate(chosen.origin, {
+                "candidate": chosen.draft.optimized_prompt,
+                "findings": [f.model_dump() for f in assessment.findings],
+            })
+            candidate = Candidate(chosen.id + "_repaired", chosen.origin, repaired)
+            candidates.append(candidate)
+            if self.dialogue_session:
+                self._dialogue_candidates = candidates
+            finalists = [c for c in candidates if c.origin == "original"] + [candidate]
+            self.rng.shuffle(finalists)
+            review = await self._review(finalists, "repair_review")
+        return self._decision(review, candidates)
 
     async def run(self, original: str):
         if self._api_mode == "dialogue":
@@ -756,6 +777,8 @@ class Optimizer:
             raise
         except WindowExceeded as error:
             return self._finish("context_exceeded", [], reason=str(error))
+        except HandoffOutputTruncated as error:
+            return self._finish("handoff_output_truncated", [], reason=str(error))
         except FidelityFailed as error:
             return self._finish("handoff_fidelity_failed", [], reason=str(error))
         except ConfigurationError as error:
@@ -897,13 +920,13 @@ class Optimizer:
                    "latest_updates": list(state.pending_delta),
                    "pending_questions": [question.model_dump() for question in state.pending_questions]}
         system = clarification_prompt()
-        for attempt in range(2):
+        for attempt in range(self.options.schema_max_attempts):
             reply = await self._call(role, system, payload,
                 "dialogue_clarification_schema_retry" if attempt else "dialogue_clarification")
             try:
                 return parse_output(reply.text, ClarificationDecision)
             except OutputError:
-                if attempt:
+                if attempt + 1 == self.options.schema_max_attempts:
                     raise
                 system += "\n上次输出结构不符合要求，请重新返回完整 JSON；不要猜测用户答案。"
 
@@ -1143,6 +1166,7 @@ class Optimizer:
         except (OptimizerError, Exception) as error:
             state.status = "failed"
             status = ("context_exceeded" if isinstance(error, WindowExceeded) else
+                      "handoff_output_truncated" if isinstance(error, HandoffOutputTruncated) else
                       "handoff_fidelity_failed" if isinstance(error, FidelityFailed) else "failed")
             reason = str(error) if isinstance(error, OptimizerError) else "会话运行未完成，服务详情未写入报告。"
             result = self._finish(status, self._dialogue_candidates, reason=reason)

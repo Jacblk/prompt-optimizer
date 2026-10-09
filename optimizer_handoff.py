@@ -16,9 +16,9 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from optimizer_config import ConfigurationError, ModelConfig, OptimizerError
+from optimizer_config import ConfigurationError, ModelConfig, OptimizerError, handoff_model_config
 from optimizer_documents import LocalReferenceLoader, ReferenceFile, ReferenceOptions, check_reference_path
-from optimizer_models import OutputError, StrictModel, Text, parse_output
+from optimizer_models import OutputError, OutputTruncatedError, StrictModel, Text, parse_output
 
 
 ESTIMATOR = "utf8_bytes (conservative; tokenizer unknown)"
@@ -41,6 +41,10 @@ class WindowExceeded(HandoffError):
 
 
 class FidelityFailed(HandoffError):
+    pass
+
+
+class HandoffOutputTruncated(HandoffError):
     pass
 
 
@@ -76,7 +80,20 @@ def read_window_config(path: Path):
             raise ValueError
         return data
     except (OSError, UnicodeError, ValueError, RecursionError):
-        raise ConfigurationError("缺少有效 context_windows.json；请先用 --configure-contexts 填写角色窗口。") from None
+        raise ConfigurationError("缺少有效窗口配置；请打开“配置模型与参数”或使用 --configure-contexts 后重新发送。") from None
+
+
+def validate_role_window(role, config, entry):
+    identity = model_identity(config)
+    if not isinstance(entry, dict) or any(entry.get(k) != v for k, v in identity.items()):
+        raise ConfigurationError(f"{role} 窗口未绑定当前模型/服务；请通过配置程序重新确认。")
+    window = entry.get("context_window")
+    if type(window) is not int or window < 1:
+        raise ConfigurationError(f"{role} 尚未填写有效的上下文窗口上限。")
+    output_limit = max(config.max_tokens, handoff_model_config(config).max_tokens)
+    if output_limit + math.ceil(window * 0.1) + 64 >= window:
+        raise ConfigurationError(f"{role} 的窗口不足以预留输出上限与 10% 余量；请通过配置程序修正。")
+    return window, identity
 
 
 @dataclass(frozen=True)
@@ -92,15 +109,7 @@ class WindowLimits:
         for role in required_roles():
             if role not in configs:
                 raise ConfigurationError("模型角色配置不完整。")
-            entry = data["roles"].get(role, {})
-            identity = model_identity(configs[role])
-            if not isinstance(entry, dict) or any(entry.get(k) != v for k, v in identity.items()):
-                raise ConfigurationError(f"{role} 窗口未绑定当前模型/服务；请重新 --configure-contexts。")
-            window = entry.get("context_window")
-            if type(window) is not int or window < 1:
-                raise ConfigurationError(f"{role} 尚未填写有效的上下文窗口上限。")
-            if configs[role].max_tokens + math.ceil(window * 0.1) + 64 >= window:
-                raise ConfigurationError(f"{role} 的窗口不足以预留输出上限与 10% 余量。")
+            window, identity = validate_role_window(role, configs[role], data["roles"].get(role, {}))
             limits[role], identities[role] = window, identity
         return cls(limits, identities)
 
@@ -420,7 +429,8 @@ class HandoffSnapshot:
 
 class HistoryPipeline:
     def __init__(self, history, windows, configs, options, call, *, progress=None):
-        self.history, self.windows, self.configs, self.options, self.call = history, windows, configs, options, call
+        self.history, self.windows, self.options, self.call = history, windows, options, call
+        self.configs = {role: handoff_model_config(config) for role, config in configs.items()}
         self.progress = progress or (lambda message: None)
         self.role = "a"
         self.checked = True
@@ -597,7 +607,7 @@ class HistoryPipeline:
                   "status": "running", "attempts": [], "summary": None}
         self.report["stages"].append(record)
         repair = None
-        max_attempts = 2 if self.checked and self.options.allow_repair else 1
+        max_attempts = self.options.handoff_max_attempts if self.checked and self.options.allow_repair else 1
         for attempt in range(max_attempts):
             payload = self._payload(stage_input, phase)
             if repair is not None:
@@ -632,6 +642,10 @@ class HistoryPipeline:
                 repair = {"reason": str(error), "previous_summary": entry.get("summary"), "fidelity": entry["audit"]}
                 if attempt + 1 == max_attempts:
                     record["status"] = "failed"
+                    if isinstance(error, OutputTruncatedError):
+                        raise HandoffOutputTruncated(
+                            f"交接阶段 {stage_id} 输出被截断，未发布交接结果。{error}"
+                            "请调整该阶段的输出上限或推理强度，然后创建新会话重试。") from None
                     raise FidelityFailed(f"交接阶段 {stage_id} 未通过；已停止，部分整理不能作为完整交接。") from None
         raise AssertionError("unreachable")
 
@@ -935,7 +949,8 @@ class _DialogueHistoryStage(HistoryPipeline):
 class DialogueHandoffPipeline:
     """Serial full preparations and updates within one dialogue."""
     def __init__(self, history, windows, configs, options, call, *, progress=None):
-        self.history, self.windows, self.configs, self.options = history, windows, configs, options
+        self.history, self.windows, self.options = history, windows, options
+        self.configs = {role: handoff_model_config(config) for role, config in configs.items()}
         self.call = call
         self.progress = progress or (lambda message: None)
         self._state = None
@@ -980,6 +995,7 @@ class DialogueHandoffPipeline:
     def _fail(self, error):
         self.report["status"] = ("cancelled" if isinstance(error, asyncio.CancelledError)
                                  else "context_exceeded" if isinstance(error, WindowExceeded)
+                                 else "handoff_output_truncated" if isinstance(error, HandoffOutputTruncated)
                                  else "handoff_fidelity_failed" if isinstance(error, FidelityFailed) else "interrupted")
         self.report["snapshot"] = None
         for stage in self.report["stages"]:

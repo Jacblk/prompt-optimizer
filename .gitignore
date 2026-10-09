@@ -5,6 +5,7 @@
 !/.gitignore
 !/CLI_WORKFLOW.md
 !/COMPATIBILITY.md
+!/CONFIGURATION.md
 !/CONTRIBUTING.md
 !/HANDOFF_ACCEPTANCE.md
 !/HANDOFF_WORKFLOW.md
@@ -15,11 +16,13 @@
 !/TUI_ACCEPTANCE.md
 !/TUI_WORKFLOW.md
 !/cli.py
-!/context_windows.json
+!/configure.py
+!/context_windows.example.json
 !/evaluate.py
 !/launcher.py
 !/optimize.py
 !/optimizer_config.py
+!/optimizer_config_ui.py
 !/optimizer_dialogue.py
 !/optimizer_documents.py
 !/optimizer_engine.py
@@ -32,6 +35,8 @@
 !/optimizer_reports.py
 !/optimizer_review.py
 !/optimizer_selection.py
+!/optimizer_settings.example.json
+!/optimizer_settings.py
 !/prompt-optimizer.cmd
 !/requirements-tui.txt
 !/requirements.txt
@@ -39,6 +44,7 @@
 !/tui.tcss
 !/tui_clipboard.py
 !/启动提示词优化器.cmd
+!/配置提示词优化器.cmd
 !/tests/
 /tests/*
 !/tests/*.py
@@ -99,6 +105,8 @@ reports/
 /evals/artifacts/
 /maintenance/
 last_optimized_prompt.md
+optimizer_settings.json
+context_windows.json
 .optimizer-*
 .DS_Store
 Thumbs.db

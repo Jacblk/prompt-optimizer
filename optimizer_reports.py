@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 
 from optimizer_config import ConfigurationError, ROOT
-from optimizer_handoff import WindowLimits, model_identity, read_window_config, required_roles
 from optimizer_io import atomic_write
 
 
@@ -31,8 +30,10 @@ def _same_path(left: Path, right: Path) -> bool:
 
 
 def _project_protected(root: Path):
-    names = (".env", "context_windows.json", "requirements.txt", "requirements-tui.txt",
-             "README.md", "TUI_WORKFLOW.md", "TUI_ACCEPTANCE.md", "tui.tcss", "HANDOFF_WORKFLOW.md", "HANDOFF_ACCEPTANCE.md",
+    names = (".env", "context_windows.json", "context_windows.example.json",
+             "optimizer_settings.json", "optimizer_settings.example.json",
+             "配置提示词优化器.cmd", "requirements.txt", "requirements-tui.txt",
+             "README.md", "CONFIGURATION.md", "TUI_WORKFLOW.md", "TUI_ACCEPTANCE.md", "tui.tcss", "HANDOFF_WORKFLOW.md", "HANDOFF_ACCEPTANCE.md",
              "COMPATIBILITY.md", "CLI_WORKFLOW.md", "REFERENCE_FILES.md", "IMPROVEMENT_PLAN.md",
              "LANGCHAIN_REUSE.md", "NATURAL_MATERIAL_REFERENCES.md", "启动提示词优化器.cmd", "prompt-optimizer.cmd")
     return ([root / name for name in names] + list(root.glob("*.py"))
@@ -211,34 +212,8 @@ def load_report(path: Path) -> dict:
 
 
 def configure_dialogue_windows(configs, values, *, path=ROOT / "context_windows.json") -> dict:
-    """Validate a complete modal response, then atomically save public bindings."""
-    path = Path(path).expanduser().resolve()
+    """Compatibility adapter; all frontend writes use the shared config service."""
+    from optimizer_settings import configure_windows
     if not isinstance(values, dict):
-        raise ConfigurationError("窗口填写结构不正确，未修改配置。")
-    if set(values) != set(required_roles()):
-        raise ConfigurationError("请填写生成器 A、B 和评审 C 的全部窗口，未修改配置。")
-    _validate_destinations([path], [p for p in _project_protected(path.parent)
-                                  if p.name != "context_windows.json"]
-                           + [path.parent / "last_optimized_prompt.md"])
-    old = read_window_config(path) if path.exists() else {"version": 1, "roles": {}}
-    fields = {"model", "service_sha256", "identity_sha256", "context_window"}
-    roles = {role: {k: v for k, v in entry.items() if k in fields}
-             for role, entry in old["roles"].items()
-             if role in set(required_roles()) and isinstance(entry, dict)}
-    for role in required_roles():
-        if role not in configs:
-            raise ConfigurationError("模型角色配置不完整，未修改窗口配置。")
-        raw = values[role]
-        try:
-            if type(raw) is not int and not isinstance(raw, str):
-                raise ValueError
-            size = int(raw.strip()) if isinstance(raw, str) else raw
-            if size < 1:
-                raise ValueError
-        except (ValueError, TypeError, OverflowError):
-            raise ConfigurationError(f"{role} 窗口须为正整数，未修改配置。") from None
-        roles[role] = {**model_identity(configs[role]), "context_window": size}
-    result = {"version": 1, "roles": roles}
-    WindowLimits.from_config(result, configs)
-    atomic_write(path, json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
-    return result
+        raise ConfigurationError("窗口填写结构不正确。")
+    return configure_windows(configs, values, path=path)
